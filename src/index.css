@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-paper: #f5f0e8;
+    --color-ink: #1a1208;
+    --color-sepia: #8b6914;
+    --color-rust: #8b2500;
+    --color-gold: #c9a227;
+  }
+
+  body {
+    @apply bg-stone-900 text-stone-100 m-0 overflow-hidden;
+    font-family: 'Georgia', serif;
+  }
+
+  #root {
+    @apply w-full h-screen;
+  }
+}
