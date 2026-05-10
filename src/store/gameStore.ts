@@ -136,6 +136,7 @@ export interface GameState {
   rivals: Rival[]
   newsQueue: NewsEvent[]
   currentNews: NewsEvent | null
+  newsHistory: NewsEvent[]
   achievedMilestones: string[]
   victoryCondition: VictoryCondition
   aiVictoryEnabled: boolean
@@ -223,6 +224,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   rivals: [],
   newsQueue: [],
   currentNews: null,
+  newsHistory: [],
   achievedMilestones: [],
   victoryCondition: 'endlos',
   aiVictoryEnabled: false,
@@ -281,6 +283,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       rivals: spawnInitialRivals(6),
       newsQueue: [],
       currentNews: introNews,
+      newsHistory: [introNews],
       achievedMilestones: ['erbe'],
       marketPrices: initMarketPrices(),
       insolvencyTurns: 0,
@@ -391,8 +394,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni',
       'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
     const newQueue: NewsEvent[] = [...state.newsQueue]
-    if (newEvent) newQueue.push(templateToNewsEvent(newEvent, year, month))
-    rivalEvents.forEach(e => newQueue.push({ ...e, date: `${MONTHS[month - 1]} ${year}` }))
+    const newHistoryItems: NewsEvent[] = []
+    if (newEvent) {
+      const ev = templateToNewsEvent(newEvent, year, month)
+      newQueue.push(ev)
+      newHistoryItems.push(ev)
+    }
+    rivalEvents.forEach(e => {
+      const ev = { ...e, date: `${MONTHS[month - 1]} ${year}` }
+      newQueue.push(ev)
+      newHistoryItems.push(ev)
+    })
 
     // 11. Steuern (15 % auf positiven Gewinn)
     if (income > 0) capital -= Math.round(income * 0.15)
@@ -424,13 +436,17 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (met && !newMilestones.includes(id)) {
         newMilestones.push(id)
         const ms = MILESTONES.find(m => m.id === id)
-        if (ms) newQueue.push({
-          id: `milestone-${id}`,
-          headline: ms.title,
-          body: ms.storyText,
-          date: `${MONTHS[month - 1]} ${year}`,
-          type: 'meilenstein',
-        })
+        if (ms) {
+          const msEv: NewsEvent = {
+            id: `milestone-${id}`,
+            headline: ms.title,
+            body: ms.storyText,
+            date: `${MONTHS[month - 1]} ${year}`,
+            type: 'meilenstein',
+          }
+          newQueue.push(msEv)
+          newHistoryItems.push(msEv)
+        }
       }
     })
 
@@ -458,14 +474,16 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (state.victoryCondition === 'marktfuehrer' && uniqueBranchesV >= 4 && companiesWithRevenue.length >= 6) victoryMet = true
 
       if (victoryMet) {
-        newQueue.push({
+        const victoryEv: NewsEvent = {
           id: 'victory-news',
           headline: 'Sieg! Das Imperium ist vollbracht.',
           body: `${state.playerName} hat das gesteckte Ziel erreicht. Europa kennt keinen größeren Namen mehr.`,
           date: `${MONTHS[month - 1]} ${year}`,
           type: 'meilenstein',
-        })
-        set({ phase: 'victory', currentNews: newQueue[0] ?? null, newsQueue: newQueue.slice(1) })
+        }
+        newQueue.push(victoryEv)
+        newHistoryItems.push(victoryEv)
+        set({ phase: 'victory', currentNews: newQueue[0] ?? null, newsQueue: newQueue.slice(1), newsHistory: [...state.newsHistory, ...newHistoryItems] })
         return
       }
 
@@ -510,6 +528,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       marketPrices: newMarketPrices,
       currentNews: newQueue[0] ?? null,
       newsQueue: newQueue.slice(1),
+      newsHistory: [...state.newsHistory, ...newHistoryItems],
       achievedMilestones: newMilestones,
       insolvencyTurns,
       phase: newPhase,
@@ -579,6 +598,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       aiVictoryEnabled: d.aiVictoryEnabled ?? false,
       currentNews: null,
       newsQueue: [],
+      newsHistory: d.newsHistory ?? [],
       laborMarketAvailability: rollLaborMarket(),
     })
   },

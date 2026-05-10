@@ -201,13 +201,33 @@ export default function CompanyDetail({
                     ))}
                   </div>
 
-                  {ipoMoeglich && !ipoConfirm && (
-                    <button
-                      onClick={() => setIpoConfirm(true)}
-                      className="w-full py-2 text-xs border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors"
-                    >
-                      An die Börse bringen →
-                    </button>
+                  {!ipoConfirm && (
+                    <div className="relative group">
+                      <button
+                        onClick={() => ipoMoeglich && setIpoConfirm(true)}
+                        disabled={!ipoMoeglich}
+                        className={`w-full py-2 text-xs border transition-colors ${
+                          ipoMoeglich
+                            ? 'border-amber-700 text-amber-400 hover:bg-amber-900/30 cursor-pointer'
+                            : 'border-stone-700 text-stone-600 cursor-not-allowed'
+                        }`}
+                      >
+                        An die Börse bringen →
+                      </button>
+                      {!ipoMoeglich && (
+                        <div className="absolute bottom-full left-0 right-0 mb-1.5 bg-stone-800 border border-stone-600 p-2.5 hidden group-hover:block z-50 shadow-xl">
+                          <p className="text-stone-400 text-xs font-semibold mb-2 uppercase tracking-wider">IPO-Bedingungen</p>
+                          <div className="space-y-1">
+                            {ipoBedingungen.map(b => (
+                              <div key={b.label} className="flex justify-between items-center gap-3 text-xs">
+                                <span className={b.ok ? 'text-stone-400' : 'text-stone-500'}>{b.label}</span>
+                                <span className={`font-mono font-bold ${b.ok ? 'text-green-400' : 'text-red-500'}`}>{b.wert}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {ipoMoeglich && ipoConfirm && (

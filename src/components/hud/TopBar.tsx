@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useGameStore } from '../../store/gameStore'
 import LoanModal from '../modals/LoanModal'
+import NewsArchiveModal from '../modals/NewsArchiveModal'
 
 const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez']
 
@@ -12,8 +13,9 @@ function formatMoney(amount: number): string {
 }
 
 export default function TopBar() {
-  const { year, month, capital, debt, playerName, companies, insolvencyTurns, endTurn, saveGame } = useGameStore()
+  const { year, month, capital, debt, playerName, companies, insolvencyTurns, endTurn, saveGame, newsHistory } = useGameStore()
   const [showLoan, setShowLoan] = useState(false)
+  const [showArchive, setShowArchive] = useState(false)
 
   const netProfit = companies.reduce((sum, c) => sum + c.revenue - c.expenses, 0)
   const monthlyInterest = Math.round(debt * 0.00417)
@@ -47,6 +49,20 @@ export default function TopBar() {
           <div className="text-stone-300 text-sm font-mono">
             {MONTHS[month - 1]} {year}
           </div>
+
+          {/* Zeitungsarchiv */}
+          <button
+            onClick={() => setShowArchive(true)}
+            title={`Zeitungsarchiv (${newsHistory.length} Berichte)`}
+            className="relative text-stone-500 hover:text-amber-400 transition-colors text-base leading-none"
+          >
+            📰
+            {newsHistory.length > 0 && (
+              <span className="absolute -top-1 -right-1.5 text-[9px] bg-amber-700 text-amber-100 rounded-full w-3.5 h-3.5 flex items-center justify-center font-bold leading-none">
+                {newsHistory.length > 9 ? '9+' : newsHistory.length}
+              </span>
+            )}
+          </button>
 
           <div className="flex-1" />
 
@@ -104,6 +120,7 @@ export default function TopBar() {
       </div>
 
       {showLoan && <LoanModal onClose={() => setShowLoan(false)} />}
+      {showArchive && <NewsArchiveModal onClose={() => setShowArchive(false)} />}
     </>
   )
 }
