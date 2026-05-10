@@ -8,7 +8,7 @@ import {
   ZoomableGroup,
 } from 'react-simple-maps'
 import { useGameStore } from '../../store/gameStore'
-import { CITIES, BRANCH_LABELS } from '../../data/cities'
+import { CITIES, BRANCH_LABELS, type City } from '../../data/cities'
 
 const GEO_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json'
 
@@ -38,8 +38,8 @@ function CityTooltip({ city, hasPresence }: { city: City; hasPresence: boolean }
         {Object.entries(city.branchStrengths).map(([branch, bonus]) => (
           <div key={branch} className="flex justify-between text-xs">
             <span className="text-stone-400">{BRANCH_LABELS[branch as keyof typeof BRANCH_LABELS]}</span>
-            <span className={bonus >= 1.3 ? 'text-amber-400' : 'text-stone-300'}>
-              +{((bonus - 1) * 100).toFixed(0)}%
+            <span className={(bonus as number) >= 1.3 ? 'text-amber-400' : 'text-stone-300'}>
+              +{(((bonus as number) - 1) * 100).toFixed(0)}%
             </span>
           </div>
         ))}
