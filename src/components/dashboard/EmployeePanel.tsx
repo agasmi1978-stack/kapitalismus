@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useGameStore, type EmployeeLevel, type Employee } from '../../store/gameStore'
+import { useGameStore, type EmployeeLevel, type Employee, HIRING_COST, TRAINING_COST, REVENUE_PER_EMPLOYEE } from '../../store/gameStore'
+import { useToastStore } from '../../store/toastStore'
 
 const LEVEL_LABELS: Record<EmployeeLevel, string> = {
   arbeiter: 'Arbeiter',
@@ -13,12 +14,6 @@ const LEVEL_COLOR: Record<EmployeeLevel, string> = {
   manager: 'text-amber-400',
 }
 
-const HIRE_COST: Record<EmployeeLevel, number> = {
-  arbeiter: 0,
-  fachkraft: 0,
-  manager: 0,
-}
-
 function MoraleBar({ morale }: { morale: number }) {
   const color = morale >= 60 ? 'bg-green-500' : morale >= 40 ? 'bg-yellow-500' : 'bg-red-500'
   return (
@@ -28,25 +23,36 @@ function MoraleBar({ morale }: { morale: number }) {
   )
 }
 
+function ProductivityBar({ productivity }: { productivity: number }) {
+  const color = productivity >= 90 ? 'bg-green-500' : productivity >= 70 ? 'bg-amber-500' : 'bg-orange-600'
+  return (
+    <div className="w-full h-1.5 bg-stone-700 rounded-full overflow-hidden">
+      <div className={`h-full ${color} transition-all duration-500`} style={{ width: `${productivity}%` }} />
+    </div>
+  )
+}
+
 function EmployeeRow({ emp, companyId }: { emp: Employee; companyId: string }) {
   const { fireEmployee, trainEmployee, setSalary } = useGameStore()
+  const { addToast } = useToastStore()
   const [editSalary, setEditSalary] = useState(false)
   const [salaryInput, setSalaryInput] = useState(String(emp.salary))
-  const [error, setError] = useState<string | null>(null)
 
   const handleTrain = () => {
     const err = trainEmployee(companyId, emp.id)
-    setError(err)
-    if (!err) setTimeout(() => setError(null), 3000)
+    if (err) addToast(err, 'error')
+    else addToast('Weiterbildung abgeschlossen!', 'success')
   }
 
   const handleSalary = () => {
     const val = parseInt(salaryInput)
-    if (isNaN(val) || val < 100) { setError('Mindestgehalt: 100 ℛℳ'); return }
+    if (isNaN(val) || val < 100) { addToast('Mindestgehalt: 100 ℛℳ', 'error'); return }
     setSalary(companyId, emp.id, val)
     setEditSalary(false)
-    setError(null)
   }
+
+  const currentRevenue = Math.round(REVENUE_PER_EMPLOYEE[emp.level] * (emp.productivity / 100))
+  const trainingCost = TRAINING_COST[emp.level]
 
   return (
     <div className="bg-stone-800 border border-stone-700 p-3 rounded">
@@ -65,9 +71,17 @@ function EmployeeRow({ emp, companyId }: { emp: Employee; companyId: string }) {
         </button>
       </div>
 
+      {/* Moral */}
       <MoraleBar morale={emp.morale} />
-      <p className="text-xs text-stone-600 mt-1 mb-2">
+      <p className="text-xs text-stone-600 mt-0.5 mb-1.5">
         Moral: {emp.morale}/100 {emp.morale < 40 ? '⚠ Streikgefahr' : ''}
+      </p>
+
+      {/* Produktivität */}
+      <ProductivityBar productivity={emp.productivity} />
+      <p className="text-xs text-stone-600 mt-0.5 mb-2">
+        Produktivität: {Math.round(emp.productivity)} % · Ertrag: <span className="text-stone-400 font-mono">{currentRevenue.toLocaleString('de-DE')} ℛℳ/Mo</span>
+        {emp.productivity < 100 && <span className="text-stone-600"> (wächst noch)</span>}
       </p>
 
       <div className="flex items-center justify-between gap-3">
@@ -95,28 +109,27 @@ function EmployeeRow({ emp, companyId }: { emp: Employee; companyId: string }) {
           <button
             onClick={handleTrain}
             className="text-xs px-2 py-0.5 border border-stone-600 hover:border-amber-600 text-stone-400 hover:text-amber-300 transition-colors whitespace-nowrap"
+            title={`Weiterbildung: ${trainingCost.toLocaleString('de-DE')} ℛℳ`}
           >
-            Weiterbilden →
+            Weiterbilden ({(trainingCost / 1000).toFixed(0)}K ℛℳ) →
           </button>
         )}
       </div>
-
-      {error && <p className="text-xs text-red-400 mt-2">{error}</p>}
     </div>
   )
 }
 
-export default function EmployeePanel({ companyId, branch }: { companyId: string; branch: string }) {
-  const { companies, capital, hireEmployee } = useGameStore()
+export default function EmployeePanel({ companyId }: { companyId: string }) {
+  const { companies, laborMarketAvailability, hireEmployee } = useGameStore()
+  const { addToast } = useToastStore()
   const company = companies.find(c => c.id === companyId)
-  const [error, setError] = useState<string | null>(null)
 
   if (!company) return null
 
   const handleHire = (level: EmployeeLevel) => {
     const err = hireEmployee(companyId, level)
-    setError(err)
-    if (!err) setTimeout(() => setError(null), 3000)
+    if (err) addToast(err, 'error')
+    else addToast(`${LEVEL_LABELS[level]} eingestellt! Einrichtungskosten: ${HIRING_COST[level].toLocaleString('de-DE')} ℛℳ`, 'success')
   }
 
   const byLevel = (level: EmployeeLevel) => company.employees.filter(e => e.level === level)
@@ -142,26 +155,43 @@ export default function EmployeePanel({ companyId, branch }: { companyId: string
 
       {/* Einstellen */}
       <div>
-        <p className="text-xs text-stone-500 uppercase tracking-widest mb-2">Einstellen</p>
-        <div className="flex gap-2">
-          {(['arbeiter', 'fachkraft', 'manager'] as EmployeeLevel[]).map(level => (
-            <button
-              key={level}
-              onClick={() => handleHire(level)}
-              className="flex-1 py-2 text-xs border border-stone-700 hover:border-amber-600 text-stone-400 hover:text-amber-300 transition-colors"
-            >
-              + {LEVEL_LABELS[level]}
-            </button>
-          ))}
+        <p className="text-xs text-stone-500 uppercase tracking-widest mb-2">Einstellen — Arbeitsmarkt diesen Monat</p>
+        <div className="space-y-1.5">
+          {(['arbeiter', 'fachkraft', 'manager'] as EmployeeLevel[]).map(level => {
+            const available = laborMarketAvailability[level]
+            return (
+              <button
+                key={level}
+                onClick={() => handleHire(level)}
+                disabled={!available}
+                className={`w-full flex items-center justify-between px-3 py-2 text-xs border transition-colors ${
+                  available
+                    ? 'border-stone-700 hover:border-amber-600 text-stone-400 hover:text-amber-300'
+                    : 'border-stone-800 text-stone-700 cursor-not-allowed'
+                }`}
+              >
+                <span>
+                  {available ? '+ ' : '✕ '}
+                  {LEVEL_LABELS[level]}
+                  {!available && ' (nicht verfügbar)'}
+                </span>
+                <span className="font-mono text-stone-500">
+                  {HIRING_COST[level].toLocaleString('de-DE')} ℛℳ Einrichtung · {REVENUE_PER_EMPLOYEE[level].toLocaleString('de-DE')} ℛℳ/Mo max
+                </span>
+              </button>
+            )
+          })}
         </div>
-        {error && <p className="text-xs text-red-400 mt-2">{error}</p>}
+        <p className="text-xs text-stone-700 mt-1.5">
+          Verfügbarkeit ändert sich jeden Monat. Produktivität startet bei 50 % und wächst über ~8 Monate auf 100 %.
+        </p>
       </div>
 
       {/* Mitarbeiterliste */}
       {company.employees.length === 0 ? (
         <p className="text-sm text-stone-600 text-center py-4">Noch keine Mitarbeiter eingestellt.</p>
       ) : (
-        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+        <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
           {company.employees.map(emp => (
             <EmployeeRow key={emp.id} emp={emp} companyId={companyId} />
           ))}

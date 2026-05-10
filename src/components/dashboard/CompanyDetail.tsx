@@ -143,7 +143,7 @@ export default function CompanyDetail({
                   {company.investmentGoods.map(g => (
                     <div key={g.id} className="flex justify-between text-sm mb-1.5">
                       <span className="text-stone-400">{g.name}</span>
-                      <span className="text-green-400 font-mono">+{formatMoney(g.capacityBonus)}/Mo</span>
+                      <span className="text-green-400 font-mono">+{formatMoney(g.maxBonus)}/Mo max</span>
                     </div>
                   ))}
                 </div>
@@ -159,7 +159,7 @@ export default function CompanyDetail({
           )}
 
           {tab === 'mitarbeiter' && (
-            <EmployeePanel companyId={company.id} branch={company.branch} />
+            <EmployeePanel companyId={company.id} />
           )}
 
           {tab === 'investitionen' && (

@@ -58,7 +58,7 @@ export default function InvestmentGoodsPanel({ companyId, branch }: { companyId:
                 <span className="text-xl">{TYPE_ICONS[g.type]}</span>
                 <div>
                   <p className="text-xs text-amber-200 font-semibold">{g.name}</p>
-                  <p className="text-xs text-green-400 font-mono">+{formatMoney(g.capacityBonus)}/Mo</p>
+                  <p className="text-xs text-green-400 font-mono">+{formatMoney(g.maxBonus)}/Mo max</p>
                 </div>
               </div>
             ))}
@@ -92,7 +92,7 @@ export default function InvestmentGoodsPanel({ companyId, branch }: { companyId:
                   <p className="text-sm text-stone-200 font-semibold">{t.name}</p>
                   <p className="text-xs text-stone-500 mt-0.5">{t.description}</p>
                   <p className="text-xs text-green-400 font-mono mt-1">
-                    +{formatMoney(t.revenueBonus)}/Monat Einnahmen
+                    +{formatMoney(t.revenueBonus)}/Monat max · Anlauf: {t.maturityTurns} Monate
                   </p>
                 </div>
                 <div className="text-right shrink-0">

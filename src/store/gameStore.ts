@@ -11,6 +11,12 @@ import { RIVAL_TEMPLATES } from '../data/rivals'
 
 let _companyCounter = 0
 function newCompanyId() { return `company-${++_companyCounter}` }
+let _employeeCounter = 0
+function newEmployeeId() { return `emp-${++_employeeCounter}` }
+
+// ---------------------------------------------------------------------------
+// Konstanten
+// ---------------------------------------------------------------------------
 
 const SALARY_DEFAULT: Record<EmployeeLevel, number> = {
   arbeiter: 300,
@@ -18,23 +24,45 @@ const SALARY_DEFAULT: Record<EmployeeLevel, number> = {
   manager: 1200,
 }
 
-const REVENUE_PER_EMPLOYEE: Record<EmployeeLevel, number> = {
-  arbeiter: 450,
-  fachkraft: 900,
-  manager: 1600,
+// Maximalertrag bei 100 % Produktivität
+export const REVENUE_PER_EMPLOYEE: Record<EmployeeLevel, number> = {
+  arbeiter: 500,
+  fachkraft: 1000,
+  manager: 1800,
 }
 
-const TRAINING_COST: Record<EmployeeLevel, number> = {
-  arbeiter: 2000,
-  fachkraft: 2500,
+// Einmalige Einstellungskosten (Arbeitsplatz, Einarbeitung, Verwaltung)
+export const HIRING_COST: Record<EmployeeLevel, number> = {
+  arbeiter: 1500,
+  fachkraft: 5000,
+  manager: 15000,
+}
+
+// Weiterbildungskosten
+export const TRAINING_COST: Record<EmployeeLevel, number> = {
+  arbeiter: 10000,
+  fachkraft: 30000,
   manager: 0,
 }
 
-let _employeeCounter = 0
-function newEmployeeId() { return `emp-${++_employeeCounter}` }
+// Produktivität wächst 6,25 % pro Monat → von 50 % auf 100 % in 8 Monaten
+const PRODUCTIVITY_GAIN_PER_TURN = 6.25
+
+// Chancen auf Verfügbarkeit pro Monat
+const LABOR_MARKET_CHANCE: Record<EmployeeLevel, number> = {
+  arbeiter: 0.80,
+  fachkraft: 0.55,
+  manager: 0.35,
+}
+
+const FOUND_COST = 35000
+
+// ---------------------------------------------------------------------------
+// Typen & Interfaces
+// ---------------------------------------------------------------------------
 
 export type EmployeeLevel = 'arbeiter' | 'fachkraft' | 'manager'
-export type InvestmentGoodType = 'maschine' | 'fahrzeug' | 'gebaeude' | 'lager'
+export type InvestmentGoodType = 'maschine' | 'fahrzeug' | 'gebaeude' | 'lager' | 'sonstiges'
 export type GamePhase = 'menu' | 'setup' | 'playing' | 'gameover' | 'victory'
 export type VictoryCondition = 'vermoegen' | 'marktfuehrer' | 'expansion' | 'endlos'
 
@@ -44,6 +72,8 @@ export interface Employee {
   salary: number
   morale: number
   skill: number
+  hiredAt: number       // Runde, in der eingestellt
+  productivity: number  // 50–100, wächst über Zeit
 }
 
 export interface InvestmentGood {
@@ -51,7 +81,9 @@ export interface InvestmentGood {
   type: InvestmentGoodType
   name: string
   cost: number
-  capacityBonus: number
+  maxBonus: number      // Vollertrag bei 100 % Reife
+  maturityTurns: number // Monate bis Vollertrag
+  purchasedAt: number   // Runde des Kaufs
 }
 
 export interface Company {
@@ -59,7 +91,8 @@ export interface Company {
   name: string
   branch: Branch
   cityId: string
-  revenue: number
+  baseRevenue: number   // Grundumsatz ohne Mitarbeiter/Güter
+  revenue: number       // Gesamtumsatz (dynamisch berechnet & gespeichert)
   expenses: number
   employees: Employee[]
   investmentGoods: InvestmentGood[]
@@ -113,6 +146,7 @@ export interface GameState {
   branchBonusOverrides: Partial<Record<Branch, number>>
   activeCooperations: Array<{ rivalId: string; rivalName: string; branch: Branch; turnsLeft: number }>
   decisionsMade: string[]
+  laborMarketAvailability: Record<EmployeeLevel, boolean>
 
   setPhase: (phase: GamePhase) => void
   setPlayerName: (name: string) => void
@@ -140,7 +174,38 @@ export interface GameState {
   proposeCooperation: (rivalId: string, branch: Branch) => string | null
 }
 
+// ---------------------------------------------------------------------------
+// Hilfsfunktionen
+// ---------------------------------------------------------------------------
+
+function rollLaborMarket(): Record<EmployeeLevel, boolean> {
+  return {
+    arbeiter: Math.random() < LABOR_MARKET_CHANCE.arbeiter,
+    fachkraft: Math.random() < LABOR_MARKET_CHANCE.fachkraft,
+    manager: Math.random() < LABOR_MARKET_CHANCE.manager,
+  }
+}
+
+/** Berechnet den aktuellen Gesamtumsatz einer Firma dynamisch */
+function computeCompanyRevenue(company: Company, turn: number): number {
+  const empRevenue = company.employees.reduce((sum, e) => {
+    return sum + Math.round(REVENUE_PER_EMPLOYEE[e.level] * (e.productivity / 100))
+  }, 0)
+
+  const goodsRevenue = company.investmentGoods.reduce((sum, g) => {
+    const monthsOwned = Math.max(0, turn - g.purchasedAt)
+    const maturity = Math.min(1.0, 0.2 + (monthsOwned / Math.max(1, g.maturityTurns)) * 0.8)
+    return sum + Math.round(g.maxBonus * maturity)
+  }, 0)
+
+  return (company.baseRevenue ?? 1500) + empRevenue + goodsRevenue
+}
+
 const STARTING_CAPITAL = 30000
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
 
 export const useGameStore = create<GameState>((set, get) => ({
   phase: 'menu',
@@ -167,6 +232,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   branchBonusOverrides: {},
   activeCooperations: [],
   decisionsMade: [],
+  laborMarketAvailability: { arbeiter: true, fachkraft: true, manager: true },
 
   setPhase: (phase) => set({ phase }),
   setPlayerName: (name) => set({ playerName: name }),
@@ -184,6 +250,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       name: `${playerName} & Co.`,
       branch: startBranch,
       cityId: startCityId,
+      baseRevenue: 2500,
       revenue: 2500,
       expenses: 1400,
       employees: [],
@@ -217,6 +284,11 @@ export const useGameStore = create<GameState>((set, get) => ({
       marketPrices: initMarketPrices(),
       insolvencyTurns: 0,
       gameOverReason: null,
+      laborMarketAvailability: rollLaborMarket(),
+      pendingDecision: null,
+      decisionsMade: [],
+      branchBonusOverrides: {},
+      activeCooperations: [],
     })
   },
 
@@ -224,33 +296,54 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get()
     let { capital, month, year, turn, marketPrices } = state
 
-    // 1. Weltereignis würfeln
-    let newEvent = generateEvent(year)
+    // 1. Weltereignis
+    const newEvent = generateEvent(year)
     const branchEffect = newEvent?.branchEffect ?? {}
 
-    // 2. Marktpreise aktualisieren
+    // 2. Marktpreise
     const newMarketPrices = updateMarketPrices(marketPrices, branchEffect)
 
-    // 3. Kooperationen aktualisieren (Laufzeit reduzieren)
+    // 3. Kooperationen
     const updatedCooperations = state.activeCooperations
       .map(c => ({ ...c, turnsLeft: c.turnsLeft - 1 }))
       .filter(c => c.turnsLeft > 0)
 
-    // Kooperations-Bonus auf Marktpreise aufaddieren
     const cooperationBonus: Partial<Record<Branch, number>> = {}
     updatedCooperations.forEach(coop => {
       cooperationBonus[coop.branch] = (cooperationBonus[coop.branch] ?? 0) + 0.12
     })
 
-    // 4. Unternehmensgewinne berechnen (Marktpreise + Synergien + Kooperation + Entscheidungsboni)
-    const synergies = computeSynergies(state.companies)
+    // 4. Mitarbeiter: Produktivität steigern + Moral-Drift
+    const companiesAfterGrowth = state.companies.map(c => ({
+      ...c,
+      employees: c.employees.map(e => {
+        const newProductivity = Math.min(100, e.productivity + PRODUCTIVITY_GAIN_PER_TURN)
+        const fairSalary = SALARY_DEFAULT[e.level]
+        const moraleDrift = e.salary >= fairSalary ? 2 : -3
+        return {
+          ...e,
+          productivity: newProductivity,
+          morale: Math.max(0, Math.min(100, e.morale + moraleDrift)),
+        }
+      }),
+    }))
+
+    // 5. Umsatz dynamisch neu berechnen (Produktivität + Güter-Reife)
+    const companiesWithRevenue = companiesAfterGrowth.map(c => ({
+      ...c,
+      revenue: computeCompanyRevenue(c, turn),
+    }))
+
+    // 6. Synergien & Boni aufbauen
+    const synergies = computeSynergies(companiesWithRevenue)
     const combinedBonus: Partial<Record<Branch, number>> = { ...state.branchBonusOverrides }
     Object.entries(cooperationBonus).forEach(([b, v]) => {
       combinedBonus[b as Branch] = (combinedBonus[b as Branch] ?? 0) + v
     })
 
+    // 7. Einkommen berechnen
     let income = 0
-    state.companies.forEach((c) => {
+    companiesWithRevenue.forEach((c) => {
       const marketRevenue = applyMarketToRevenue(c.revenue, c.branch, newMarketPrices)
       const synergyRevenue = applySynergiesToRevenue(marketRevenue, c.branch, synergies)
       const decisionBonus = 1 + (combinedBonus[c.branch] ?? 0)
@@ -258,18 +351,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     })
     capital += income
 
-    // 4. Moral-Drift: niedrige Gehälter senken Moral, hohe heben sie
-    const updatedCompanies = state.companies.map(c => ({
-      ...c,
-      employees: c.employees.map(e => {
-        const fairSalary = e.level === 'manager' ? 1200 : e.level === 'fachkraft' ? 600 : 300
-        const moraleDrift = e.salary >= fairSalary ? 2 : -3
-        return { ...e, morale: Math.max(0, Math.min(100, e.morale + moraleDrift)) }
-      }),
-    }))
-
-    // 5. Streiks verarbeiten
-    updatedCompanies.forEach(c => {
+    // 8. Streiks
+    companiesWithRevenue.forEach(c => {
       const strikers = c.employees.filter(e => e.morale < 40)
       if (strikers.length > 0) {
         const lostRevenue = strikers.length * 200
@@ -278,48 +361,33 @@ export const useGameStore = create<GameState>((set, get) => ({
       }
     })
 
-    // 6. KI-Rivalen aktualisieren
-    const playerNetWorth = capital + state.companies.reduce((s, c) => s + c.revenue * 12, 0)
+    // 9. KI-Rivalen
+    const playerNetWorth = capital + companiesWithRevenue.reduce((s, c) => s + c.revenue * 12, 0)
     const { updatedRivals, events: rivalEvents } = updateRivals(state.rivals, newMarketPrices, playerNetWorth)
 
-    // 7. News-Queue aufbauen
+    // 10. News-Queue
+    const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni',
+      'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
     const newQueue: NewsEvent[] = [...state.newsQueue]
-    if (newEvent) {
-      const newsItem = templateToNewsEvent(newEvent, year, month)
-      newQueue.push(newsItem)
-    }
-    rivalEvents.forEach(e => {
-      const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni',
-        'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
-      newQueue.push({ ...e, date: `${MONTHS[month - 1]} ${year}` })
-    })
+    if (newEvent) newQueue.push(templateToNewsEvent(newEvent, year, month))
+    rivalEvents.forEach(e => newQueue.push({ ...e, date: `${MONTHS[month - 1]} ${year}` }))
 
-    // Marktpreiseffekte auch auf Rivalen anwenden (via rivalEvents bereits)
+    // 11. Steuern (15 % auf positiven Gewinn)
+    if (income > 0) capital -= Math.round(income * 0.15)
 
-    // 8. Steuern (15% auf positiven Gewinn)
-    const grossProfit = income
-    if (grossProfit > 0) {
-      const tax = Math.round(grossProfit * 0.15)
-      capital -= tax
-    }
+    // 12. Kreditzinsen
+    if (state.debt > 0) capital -= Math.round(state.debt * 0.00417)
 
-    // 9. Kreditzinsen (5% p.a. = ~0.417% pro Monat)
-    const { debt } = state
-    if (debt > 0) {
-      const interest = Math.round(debt * 0.00417)
-      capital -= interest
-    }
-
-    // 10. Meilensteine prüfen
+    // 13. Meilensteine
     const newMilestones = [...state.achievedMilestones]
-    const netWorth = capital + updatedCompanies.reduce((s, c) => s + c.revenue * 12, 0)
-    const totalEmployees = updatedCompanies.reduce((s, c) => s + c.employees.length, 0)
-    const uniqueBranches = new Set(updatedCompanies.map(c => c.branch)).size
-    const uniqueCities = new Set(updatedCompanies.map(c => c.cityId)).size
-    const uniqueCountries = new Set(updatedCompanies.map(c => CITIES.find(ci => ci.id === c.cityId)?.country)).size
+    const netWorth = capital + companiesWithRevenue.reduce((s, c) => s + c.revenue * 12, 0)
+    const totalEmployees = companiesWithRevenue.reduce((s, c) => s + c.employees.length, 0)
+    const uniqueBranches = new Set(companiesWithRevenue.map(c => c.branch)).size
+    const uniqueCities = new Set(companiesWithRevenue.map(c => c.cityId)).size
+    const uniqueCountries = new Set(companiesWithRevenue.map(c => CITIES.find(ci => ci.id === c.cityId)?.country)).size
 
-    const milestoneChecks: Array<{ id: string; met: boolean }> = [
-      { id: 'erste_erweiterung', met: updatedCompanies.length >= 2 },
+    const milestoneChecks = [
+      { id: 'erste_erweiterung', met: companiesWithRevenue.length >= 2 },
       { id: 'erste_stadt', met: uniqueCities >= 2 },
       { id: 'erste_million', met: netWorth >= 1_000_000 },
       { id: 'alle_branchen', met: uniqueBranches >= 5 },
@@ -329,68 +397,56 @@ export const useGameStore = create<GameState>((set, get) => ({
       { id: 'grosser_arbeitgeber', met: totalEmployees >= 500 },
       { id: 'hundert_millionen', met: netWorth >= 100_000_000 },
     ]
-    const milestoneNews: NewsEvent[] = []
-    const MONTHS2 = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni',
-      'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
 
     milestoneChecks.forEach(({ id, met }) => {
       if (met && !newMilestones.includes(id)) {
         newMilestones.push(id)
         const ms = MILESTONES.find(m => m.id === id)
-        if (ms) {
-          milestoneNews.push({
-            id: `milestone-${id}`,
-            headline: ms.title,
-            body: ms.storyText,
-            date: `${MONTHS2[month - 1]} ${year}`,
-            type: 'meilenstein',
-          })
-        }
+        if (ms) newQueue.push({
+          id: `milestone-${id}`,
+          headline: ms.title,
+          body: ms.storyText,
+          date: `${MONTHS[month - 1]} ${year}`,
+          type: 'meilenstein',
+        })
       }
     })
-    newQueue.push(...milestoneNews)
 
-    // 11b. Entscheidung auslösen wenn neuer Meilenstein mit Decision verknüpft
+    // 14. Story-Entscheidungen auslösen
     let pendingDecision: Decision | null = state.pendingDecision
     const newlyAchieved = newMilestones.filter(id => !state.achievedMilestones.includes(id))
     if (!pendingDecision) {
       for (const milestoneId of newlyAchieved) {
-        const decision = DECISIONS.find(
-          d => d.milestoneId === milestoneId && !state.decisionsMade.includes(d.id)
-        )
+        const decision = DECISIONS.find(d => d.milestoneId === milestoneId && !state.decisionsMade.includes(d.id))
         if (decision) { pendingDecision = decision; break }
       }
     }
 
-    // 11. Zeit vorrücken
+    // 15. Zeit vorrücken
     month += 1
     if (month > 12) { month = 1; year += 1 }
 
-    // 12. Victory prüfen
+    // 16. Victory prüfen
     if (state.victoryCondition !== 'endlos') {
+      const uniqueCitiesV = new Set(companiesWithRevenue.map(c => c.cityId)).size
+      const uniqueBranchesV = new Set(companiesWithRevenue.map(c => c.branch)).size
       let victoryMet = false
-      const uniqueCitiesV = new Set(updatedCompanies.map(c => c.cityId)).size
-      const uniqueBranchesV = new Set(updatedCompanies.map(c => c.branch)).size
-
       if (state.victoryCondition === 'vermoegen' && netWorth >= 5_000_000) victoryMet = true
       if (state.victoryCondition === 'expansion' && uniqueCitiesV >= 8) victoryMet = true
-      if (state.victoryCondition === 'marktfuehrer' && uniqueBranchesV >= 4 && updatedCompanies.length >= 6) victoryMet = true
+      if (state.victoryCondition === 'marktfuehrer' && uniqueBranchesV >= 4 && companiesWithRevenue.length >= 6) victoryMet = true
 
       if (victoryMet) {
         newQueue.push({
           id: 'victory-news',
           headline: 'Sieg! Das Imperium ist vollbracht.',
-          body: `${state.playerName} hat das gesteckte Ziel erreicht. Europa kennt keinen größeren Namen mehr in der Wirtschaft.`,
-          date: `${MONTHS2[month - 1]} ${year}`,
+          body: `${state.playerName} hat das gesteckte Ziel erreicht. Europa kennt keinen größeren Namen mehr.`,
+          date: `${MONTHS[month - 1]} ${year}`,
           type: 'meilenstein',
         })
-        const nextNews2 = newQueue[0] ?? null
-        const remainingQueue2 = newQueue.slice(1)
-        set({ phase: 'victory', currentNews: nextNews2, newsQueue: remainingQueue2 })
+        set({ phase: 'victory', currentNews: newQueue[0] ?? null, newsQueue: newQueue.slice(1) })
         return
       }
 
-      // KI-Sieg prüfen
       if (state.aiVictoryEnabled) {
         const topRival = updatedRivals.filter(r => !r.eliminated).sort((a, b) => b.netWorth - a.netWorth)[0]
         if (topRival) {
@@ -398,13 +454,6 @@ export const useGameStore = create<GameState>((set, get) => ({
           if (state.victoryCondition === 'vermoegen' && topRival.netWorth >= 5_000_000) rivalWon = true
           if (state.victoryCondition === 'expansion' && topRival.cities.length >= 8) rivalWon = true
           if (rivalWon) {
-            newQueue.push({
-              id: 'rival-victory',
-              headline: `${topRival.name} hat gewonnen!`,
-              body: `${topRival.name} hat das Spielziel als Erster erreicht. Dein Imperium bleibt unvollendet.`,
-              date: `${MONTHS2[month - 1]} ${year}`,
-              type: 'rival',
-            })
             set({ phase: 'gameover', gameOverReason: `${topRival.name} hat das Ziel vor dir erreicht.`, currentNews: newQueue[0] ?? null, newsQueue: newQueue.slice(1) })
             return
           }
@@ -412,70 +461,58 @@ export const useGameStore = create<GameState>((set, get) => ({
       }
     }
 
-    // 13. Insolvenz prüfen
+    // 17. Insolvenz prüfen
     let { insolvencyTurns } = state
     let newPhase: GamePhase = state.phase
     let gameOverReason: string | null = state.gameOverReason
-
     if (capital < -10000) {
       insolvencyTurns += 1
       if (insolvencyTurns >= 3) {
         newPhase = 'gameover'
-        gameOverReason = 'Insolvenz — dein Kapital war drei Monate in Folge tief im Minus. Die Gläubiger haben übernommen.'
+        gameOverReason = 'Insolvenz — drei Monate tief im Minus. Die Gläubiger haben übernommen.'
       }
     } else {
       insolvencyTurns = 0
     }
 
-    const nextNews = newQueue[0] ?? null
-    const remainingQueue = newQueue.slice(1)
+    // 18. Arbeitsmarkt neu würfeln
+    const newLaborMarket = rollLaborMarket()
 
     set({
       capital,
       month,
       year,
       turn: turn + 1,
-      companies: updatedCompanies,
+      companies: companiesWithRevenue,
       rivals: updatedRivals,
       marketPrices: newMarketPrices,
-      currentNews: nextNews,
-      newsQueue: remainingQueue,
+      currentNews: newQueue[0] ?? null,
+      newsQueue: newQueue.slice(1),
       achievedMilestones: newMilestones,
       insolvencyTurns,
       phase: newPhase,
       gameOverReason,
       pendingDecision,
       activeCooperations: updatedCooperations,
+      laborMarketAvailability: newLaborMarket,
     })
   },
 
   dismissNews: () => {
     const state = get()
-    const nextNews = state.newsQueue[0] ?? null
-    const remainingQueue = state.newsQueue.slice(1)
-    set({ currentNews: nextNews, newsQueue: remainingQueue })
+    set({ currentNews: state.newsQueue[0] ?? null, newsQueue: state.newsQueue.slice(1) })
   },
 
   saveGame: () => {
     const state = get()
-    const saveData = {
-      phase: state.phase,
-      turn: state.turn,
-      year: state.year,
-      month: state.month,
-      playerName: state.playerName,
-      startCityId: state.startCityId,
-      startBranch: state.startBranch,
-      capital: state.capital,
-      debt: state.debt,
-      companies: state.companies,
-      unlockedCities: state.unlockedCities,
-      rivals: state.rivals,
+    const blob = new Blob([JSON.stringify({
+      phase: state.phase, turn: state.turn, year: state.year, month: state.month,
+      playerName: state.playerName, startCityId: state.startCityId, startBranch: state.startBranch,
+      capital: state.capital, debt: state.debt, companies: state.companies,
+      unlockedCities: state.unlockedCities, rivals: state.rivals,
       achievedMilestones: state.achievedMilestones,
-      victoryCondition: state.victoryCondition,
-      aiVictoryEnabled: state.aiVictoryEnabled,
-    }
-    const blob = new Blob([JSON.stringify(saveData, null, 2)], { type: 'application/json' })
+      victoryCondition: state.victoryCondition, aiVictoryEnabled: state.aiVictoryEnabled,
+    }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -486,6 +523,22 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   loadGame: (data: unknown) => {
     const d = data as Partial<GameState>
+    // Rückwärtskompatibilität: alte Saves ohne baseRevenue/productivity normalisieren
+    const companies = (d.companies ?? []).map((c: Company) => ({
+      ...c,
+      baseRevenue: c.baseRevenue ?? c.revenue ?? 1500,
+      employees: (c.employees ?? []).map((e: Employee) => ({
+        ...e,
+        hiredAt: e.hiredAt ?? 0,
+        productivity: e.productivity ?? 100,
+      })),
+      investmentGoods: (c.investmentGoods ?? []).map((g: InvestmentGood) => ({
+        ...g,
+        maxBonus: g.maxBonus ?? (g as unknown as { capacityBonus?: number }).capacityBonus ?? 0,
+        maturityTurns: g.maturityTurns ?? 6,
+        purchasedAt: g.purchasedAt ?? 0,
+      })),
+    }))
     set({
       phase: d.phase ?? 'playing',
       turn: d.turn ?? 0,
@@ -496,7 +549,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       startBranch: d.startBranch ?? null,
       capital: d.capital ?? 0,
       debt: d.debt ?? 0,
-      companies: d.companies ?? [],
+      companies,
       unlockedCities: d.unlockedCities ?? [],
       rivals: d.rivals ?? [],
       achievedMilestones: d.achievedMilestones ?? [],
@@ -504,56 +557,66 @@ export const useGameStore = create<GameState>((set, get) => ({
       aiVictoryEnabled: d.aiVictoryEnabled ?? false,
       currentNews: null,
       newsQueue: [],
+      laborMarketAvailability: rollLaborMarket(),
     })
   },
 
   hireEmployee: (companyId, level) => {
     const state = get()
-    const company = state.companies.find(c => c.id === companyId)
-    if (!company) return 'Firma nicht gefunden.'
 
-    // Arbeitsmarkt: Fachkräfte/Manager sind begrenzt verfügbar (einfache Simulation)
+    // Arbeitsmarkt prüfen
+    if (!state.laborMarketAvailability[level]) {
+      const label = level === 'manager' ? 'Manager' : level === 'fachkraft' ? 'Fachkraft' : 'Arbeiter'
+      return `Kein${level === 'fachkraft' ? 'e' : ''} ${label} diesen Monat verfügbar. Nächsten Monat erneut versuchen.`
+    }
+
+    // Marktlimit
     const totalOfLevel = state.companies.flatMap(c => c.employees).filter(e => e.level === level).length
     const marketLimit = level === 'manager' ? 5 : level === 'fachkraft' ? 20 : 999
-    if (totalOfLevel >= marketLimit) return `Keine ${level === 'manager' ? 'Manager' : 'Fachkräfte'} am Markt verfügbar.`
+    if (totalOfLevel >= marketLimit) return `Maximale Anzahl an ${level === 'manager' ? 'Managern' : 'Fachkräften'} bereits erreicht.`
 
-    const salary = SALARY_DEFAULT[level]
+    // Einstellungskosten
+    const hiringCost = HIRING_COST[level]
+    if (state.capital < hiringCost) return `Nicht genug Kapital für Einstellungskosten: ${hiringCost.toLocaleString('de-DE')} ℛℳ`
+
     const employee: Employee = {
       id: newEmployeeId(),
       level,
-      salary,
+      salary: SALARY_DEFAULT[level],
       morale: 70,
       skill: level === 'manager' ? 80 : level === 'fachkraft' ? 60 : 40,
+      hiredAt: state.turn,
+      productivity: 50, // startet bei 50 %, wächst auf 100 % in ~8 Monaten
     }
 
-    set({
-      companies: state.companies.map(c =>
-        c.id !== companyId ? c : {
-          ...c,
-          employees: [...c.employees, employee],
-          expenses: c.expenses + salary,
-          revenue: c.revenue + REVENUE_PER_EMPLOYEE[level],
-        }
-      ),
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      const updated = {
+        ...c,
+        employees: [...c.employees, employee],
+        expenses: c.expenses + employee.salary,
+      }
+      return { ...updated, revenue: computeCompanyRevenue(updated, state.turn) }
     })
+
+    set({ capital: state.capital - hiringCost, companies: updatedCompanies })
     return null
   },
 
   fireEmployee: (companyId, employeeId) => {
     const state = get()
-    set({
-      companies: state.companies.map(c => {
-        if (c.id !== companyId) return c
-        const emp = c.employees.find(e => e.id === employeeId)
-        if (!emp) return c
-        return {
-          ...c,
-          employees: c.employees.filter(e => e.id !== employeeId),
-          expenses: c.expenses - emp.salary,
-          revenue: c.revenue - REVENUE_PER_EMPLOYEE[emp.level],
-        }
-      }),
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      const emp = c.employees.find(e => e.id === employeeId)
+      if (!emp) return c
+      const updated = {
+        ...c,
+        employees: c.employees.filter(e => e.id !== employeeId),
+        expenses: c.expenses - emp.salary,
+      }
+      return { ...updated, revenue: computeCompanyRevenue(updated, state.turn) }
     })
+    set({ companies: updatedCompanies })
   },
 
   trainEmployee: (companyId, employeeId) => {
@@ -564,31 +627,31 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (emp.level === 'manager') return 'Manager können nicht weiter geschult werden.'
 
     const cost = TRAINING_COST[emp.level]
-    if (state.capital < cost) return `Nicht genug Kapital. Kosten: ${cost.toLocaleString('de-DE')} ℛℳ`
+    if (state.capital < cost) return `Nicht genug Kapital. Weiterbildungskosten: ${cost.toLocaleString('de-DE')} ℛℳ`
 
     const nextLevel: EmployeeLevel = emp.level === 'arbeiter' ? 'fachkraft' : 'manager'
     const salaryDiff = SALARY_DEFAULT[nextLevel] - emp.salary
-    const revenueDiff = REVENUE_PER_EMPLOYEE[nextLevel] - REVENUE_PER_EMPLOYEE[emp.level]
 
-    set({
-      capital: state.capital - cost,
-      companies: state.companies.map(c =>
-        c.id !== companyId ? c : {
-          ...c,
-          expenses: c.expenses + salaryDiff,
-          revenue: c.revenue + revenueDiff,
-          employees: c.employees.map(e =>
-            e.id !== employeeId ? e : {
-              ...e,
-              level: nextLevel,
-              salary: SALARY_DEFAULT[nextLevel],
-              skill: Math.min(100, e.skill + 20),
-              morale: Math.min(100, e.morale + 10),
-            }
-          ),
-        }
-      ),
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      const updated = {
+        ...c,
+        expenses: c.expenses + salaryDiff,
+        employees: c.employees.map(e =>
+          e.id !== employeeId ? e : {
+            ...e,
+            level: nextLevel,
+            salary: SALARY_DEFAULT[nextLevel],
+            skill: Math.min(100, e.skill + 20),
+            morale: Math.min(100, e.morale + 10),
+            productivity: 60, // nach Aufstieg leicht zurückgesetzt, wächst neu
+          }
+        ),
+      }
+      return { ...updated, revenue: computeCompanyRevenue(updated, state.turn) }
     })
+
+    set({ capital: state.capital - cost, companies: updatedCompanies })
     return null
   },
 
@@ -601,7 +664,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         if (!emp) return c
         const diff = salary - emp.salary
         const moraleChange = diff > 0 ? 10 : diff < 0 ? -15 : 0
-        return {
+        const updated = {
           ...c,
           expenses: c.expenses + diff,
           employees: c.employees.map(e =>
@@ -612,20 +675,51 @@ export const useGameStore = create<GameState>((set, get) => ({
             }
           ),
         }
+        return { ...updated, revenue: computeCompanyRevenue(updated, state.turn) }
       }),
     })
   },
 
+  buyInvestmentGood: (companyId, templateId) => {
+    const state = get()
+    const template = INVESTMENT_GOOD_TEMPLATES.find(t => t.id === templateId)
+    if (!template) return 'Investitionsgut nicht gefunden.'
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    if (!template.applicableBranches.includes(company.branch)) return 'Dieses Gut passt nicht zur Branche.'
+    if (state.capital < template.cost) return `Nicht genug Kapital. Kosten: ${template.cost.toLocaleString('de-DE')} ℛℳ`
+    if (company.investmentGoods.some(g => g.id === templateId)) return 'Diese Firma besitzt dieses Gut bereits.'
+
+    const good: InvestmentGood = {
+      id: templateId,
+      type: template.type,
+      name: template.name,
+      cost: template.cost,
+      maxBonus: template.revenueBonus,
+      maturityTurns: template.maturityTurns,
+      purchasedAt: state.turn,
+    }
+
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      const updated = { ...c, investmentGoods: [...c.investmentGoods, good] }
+      return { ...updated, revenue: computeCompanyRevenue(updated, state.turn) }
+    })
+
+    set({ capital: state.capital - template.cost, companies: updatedCompanies })
+    return null
+  },
+
   foundCompany: (name, branch, cityId) => {
     const state = get()
-    const FOUND_COST = 10000
-    if (state.capital < FOUND_COST) return `Nicht genug Kapital. Kosten: ${FOUND_COST.toLocaleString('de-DE')} ℛℳ`
+    if (state.capital < FOUND_COST) return `Nicht genug Kapital. Gründungskosten: ${FOUND_COST.toLocaleString('de-DE')} ℛℳ`
     if (!state.unlockedCities.includes(cityId)) return 'Diese Stadt ist noch nicht erschlossen.'
     const company: Company = {
       id: newCompanyId(),
       name,
       branch,
       cityId,
+      baseRevenue: 1500,
       revenue: 1500,
       expenses: 900,
       employees: [],
@@ -652,7 +746,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get()
     const MAX_DEBT = 200000
     if (amount < 1000) return 'Mindestbetrag: 1.000 ℛℳ'
-    if (state.debt + amount > MAX_DEBT) return `Kreditlimit überschritten. Maximale Verschuldung: ${MAX_DEBT.toLocaleString('de-DE')} ℛℳ`
+    if (state.debt + amount > MAX_DEBT) return `Kreditlimit überschritten. Max: ${MAX_DEBT.toLocaleString('de-DE')} ℛℳ`
     set({ capital: state.capital + amount, debt: state.debt + amount })
     return null
   },
@@ -666,53 +760,54 @@ export const useGameStore = create<GameState>((set, get) => ({
     return null
   },
 
-  buyInvestmentGood: (companyId, templateId) => {
-    const state = get()
-    const template = INVESTMENT_GOOD_TEMPLATES.find(t => t.id === templateId)
-    if (!template) return 'Investitionsgut nicht gefunden.'
-
-    const company = state.companies.find(c => c.id === companyId)
-    if (!company) return 'Firma nicht gefunden.'
-
-    if (!template.applicableBranches.includes(company.branch))
-      return 'Dieses Gut passt nicht zur Branche dieser Firma.'
-
-    if (state.capital < template.cost)
-      return `Nicht genug Kapital. Kosten: ${template.cost.toLocaleString('de-DE')} ℛℳ`
-
-    const alreadyOwned = company.investmentGoods.some(g => g.id === templateId)
-    if (alreadyOwned) return 'Dieses Investitionsgut besitzt diese Firma bereits.'
-
-    const good: InvestmentGood = {
-      id: templateId,
-      type: template.type,
-      name: template.name,
-      cost: template.cost,
-      capacityBonus: template.revenueBonus,
-    }
-
-    set({
-      capital: state.capital - template.cost,
-      companies: state.companies.map(c =>
-        c.id !== companyId ? c : {
-          ...c,
-          investmentGoods: [...c.investmentGoods, good],
-          revenue: c.revenue + template.revenueBonus,
-        }
-      ),
-    })
-    return null
-  },
-
   sellCompany: (companyId) => {
     const state = get()
     if (state.companies.length <= 1) return 'Du kannst deine letzte Firma nicht verkaufen.'
     const company = state.companies.find(c => c.id === companyId)
     if (!company) return 'Firma nicht gefunden.'
     const salePrice = Math.round(company.revenue * 10 * 0.8)
+    set({ capital: state.capital + salePrice, companies: state.companies.filter(c => c.id !== companyId) })
+    return null
+  },
+
+  buyRivalCompany: (rivalId) => {
+    const state = get()
+    const rival = state.rivals.find(r => r.id === rivalId)
+    if (!rival || rival.eliminated) return 'Rivale nicht verfügbar.'
+    if (rival.companies <= 0) return 'Dieser Rivale hat keine Firmen mehr.'
+
+    // Deutlich teurer: Faktor 2.5 statt 1.5
+    const price = Math.round((rival.netWorth / Math.max(1, rival.companies)) * 2.5)
+    if (state.capital < price) return `Nicht genug Kapital. Übernahmepreis: ${price.toLocaleString('de-DE')} ℛℳ`
+
+    const branches: Branch[] = ['handel', 'produktion', 'gastro', 'transport', 'bau']
+    const acquiredBranch = branches[Math.floor(Math.random() * branches.length)]
+    const cityId = rival.cities[0] ?? state.unlockedCities[0]
+    const baseRev = Math.round(price / 15)
+
+    const acquiredCompany: Company = {
+      id: newCompanyId(),
+      name: `${rival.name.split(' ')[1] ?? rival.name} Übernahme`,
+      branch: acquiredBranch,
+      cityId,
+      baseRevenue: baseRev,
+      revenue: baseRev,
+      expenses: Math.round(price / 25),
+      employees: [],
+      investmentGoods: [],
+      listed: false,
+      sharePrice: 100,
+      founded: state.turn,
+    }
+
+    const updatedRival = rival.companies <= 1
+      ? { ...rival, companies: 0, netWorth: rival.netWorth * 0.3, eliminated: true }
+      : { ...rival, companies: rival.companies - 1, netWorth: rival.netWorth - price / 2.5 }
+
     set({
-      capital: state.capital + salePrice,
-      companies: state.companies.filter(c => c.id !== companyId),
+      capital: state.capital - price,
+      companies: [...state.companies, acquiredCompany],
+      rivals: state.rivals.map(r => r.id === rivalId ? updatedRival : r),
     })
     return null
   },
@@ -735,23 +830,18 @@ export const useGameStore = create<GameState>((set, get) => ({
       })
     }
     if (option.effect.moraleDelta) {
-      const updatedCompanies = state.companies.map(c => ({
-        ...c,
-        employees: c.employees.map(e => ({
-          ...e,
-          morale: Math.max(0, Math.min(100, e.morale + (option.effect.moraleDelta ?? 0))),
+      set({
+        companies: state.companies.map(c => ({
+          ...c,
+          employees: c.employees.map(e => ({
+            ...e,
+            morale: Math.max(0, Math.min(100, e.morale + (option.effect.moraleDelta ?? 0))),
+          })),
         })),
-      }))
-      set({ companies: updatedCompanies })
+      })
     }
 
-    set({
-      capital,
-      debt,
-      branchBonusOverrides: newBonuses,
-      pendingDecision: null,
-      decisionsMade: [...state.decisionsMade, decisionId],
-    })
+    set({ capital, debt, branchBonusOverrides: newBonuses, pendingDecision: null, decisionsMade: [...state.decisionsMade, decisionId] })
   },
 
   proposeCooperation: (rivalId, branch) => {
@@ -763,58 +853,14 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     const COST = 15000
     if (state.capital < COST) return `Kooperationsangebot kostet ${COST.toLocaleString('de-DE')} ℛℳ.`
+    if (state.activeCooperations.some(c => c.rivalId === rivalId)) return 'Mit diesem Rivalen läuft bereits eine Kooperation.'
 
-    // Aggressiver Rivale lehnt öfter ab
     const acceptChance = 1 - template.aggressionLevel * 0.6
     if (Math.random() > acceptChance) return `${rival.name} lehnt das Angebot ab.`
 
-    const alreadyActive = state.activeCooperations.some(c => c.rivalId === rivalId)
-    if (alreadyActive) return 'Mit diesem Rivalen läuft bereits eine Kooperation.'
-
     set({
       capital: state.capital - COST,
-      activeCooperations: [
-        ...state.activeCooperations,
-        { rivalId, rivalName: rival.name, branch, turnsLeft: 12 },
-      ],
-    })
-    return null
-  },
-
-  buyRivalCompany: (rivalId) => {
-    const state = get()
-    const rival = state.rivals.find(r => r.id === rivalId)
-    if (!rival || rival.eliminated) return 'Rivale nicht verfügbar.'
-    if (rival.companies <= 0) return 'Dieser Rivale hat keine Firmen mehr.'
-    const price = Math.round((rival.netWorth / Math.max(1, rival.companies)) * 1.5)
-    if (state.capital < price) return `Nicht genug Kapital. Preis: ${price.toLocaleString('de-DE')} ℛℳ`
-
-    const branches: Branch[] = ['handel', 'produktion', 'gastro', 'transport', 'bau']
-    const acquiredBranch = branches[Math.floor(Math.random() * branches.length)]
-    const cityId = rival.cities[0] ?? state.unlockedCities[0]
-
-    const acquiredCompany: Company = {
-      id: newCompanyId(),
-      name: `${rival.name.split(' ')[1] ?? rival.name} Übernahme`,
-      branch: acquiredBranch,
-      cityId,
-      revenue: Math.round(price / 15),
-      expenses: Math.round(price / 25),
-      employees: [],
-      investmentGoods: [],
-      listed: false,
-      sharePrice: 100,
-      founded: state.turn,
-    }
-
-    const updatedRival = rival.companies <= 1
-      ? { ...rival, companies: 0, netWorth: rival.netWorth * 0.3, eliminated: true }
-      : { ...rival, companies: rival.companies - 1, netWorth: rival.netWorth - price / 1.5 }
-
-    set({
-      capital: state.capital - price,
-      companies: [...state.companies, acquiredCompany],
-      rivals: state.rivals.map(r => r.id === rivalId ? updatedRival : r),
+      activeCooperations: [...state.activeCooperations, { rivalId, rivalName: rival.name, branch, turnsLeft: 12 }],
     })
     return null
   },
