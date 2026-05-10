@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { BRANCH_LABELS, CITIES } from '../../data/cities'
 import { useGameStore, type Company } from '../../store/gameStore'
+import { useToastStore } from '../../store/toastStore'
 import EmployeePanel from './EmployeePanel'
 import InvestmentGoodsPanel from './InvestmentGoodsPanel'
 
@@ -23,15 +24,40 @@ export default function CompanyDetail({
   const [tab, setTab] = useState<DetailTab>('uebersicht')
   const [sellConfirm, setSellConfirm] = useState(false)
   const [sellError, setSellError] = useState<string | null>(null)
-  const { sellCompany, companies } = useGameStore()
+  const [ipoConfirm, setIpoConfirm] = useState(false)
+  const { sellCompany, listCompany, turn } = useGameStore()
+  const { addToast } = useToastStore()
   const city = CITIES.find(c => c.id === company.cityId)
   const profit = company.revenue - company.expenses
   const salePrice = Math.round(company.revenue * 10 * 0.8)
+
+  // IPO-Kalkulation
+  const firmenwert = company.revenue * 10
+  const ipoKosten = 40000 + Math.round(firmenwert * 0.03)
+  const emissionserloes = Math.round(company.revenue * 8)
+  const ipoNetto = emissionserloes - ipoKosten
+  const age = turn - company.founded
+
+  // Börsengang-Bedingungen
+  const ipoBedingungen = [
+    { label: 'Alter ≥ 12 Monate', ok: age >= 12, wert: `${age} Mo.` },
+    { label: 'Profitabel', ok: profit > 0, wert: profit > 0 ? '✓' : '✗' },
+    { label: 'Mindestens 5 Mitarbeiter', ok: company.employees.length >= 5, wert: `${company.employees.length}` },
+    { label: 'Umsatz ≥ 8.000 ℛℳ/Mo', ok: company.revenue >= 8000, wert: `${Math.round(company.revenue / 1000)}K` },
+  ]
+  const ipoMoeglich = ipoBedingungen.every(b => b.ok) && !company.listed
 
   const handleSell = () => {
     const err = sellCompany(company.id)
     if (err) { setSellError(err); return }
     onClose()
+  }
+
+  const handleIpo = () => {
+    const err = listCompany(company.id)
+    if (err) { addToast(err, 'error'); setIpoConfirm(false); return }
+    addToast(`${company.name} erfolgreich an die Börse gebracht! +${formatMoney(emissionserloes)} Emissionserlös.`, 'success')
+    setIpoConfirm(false)
   }
 
   return (
@@ -149,10 +175,82 @@ export default function CompanyDetail({
                 </div>
               )}
 
-              {company.listed && (
-                <div className="bg-stone-800 border border-amber-900 p-4">
-                  <p className="text-xs text-amber-600 uppercase tracking-widest mb-1">Börsennotiert</p>
-                  <p className="text-amber-300 font-mono">{formatMoney(company.sharePrice)} / Aktie</p>
+              {company.listed ? (
+                <div className="bg-stone-800 border border-amber-800 p-4">
+                  <p className="text-xs text-amber-600 uppercase tracking-widest mb-2">Börsennotiert</p>
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="text-stone-400">Aktienkurs</span>
+                    <span className="text-amber-300 font-mono font-bold">{formatMoney(company.sharePrice)} / Aktie</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-stone-400">Dividende (monatl.)</span>
+                    <span className="text-red-400 font-mono">−{formatMoney(Math.round(Math.max(0, profit) * 0.10))}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-stone-800 border border-stone-700 p-4">
+                  <p className="text-xs text-stone-500 uppercase tracking-widest mb-3">Börsengang (IPO)</p>
+
+                  {/* Bedingungen */}
+                  <div className="space-y-1 mb-3">
+                    {ipoBedingungen.map(b => (
+                      <div key={b.label} className="flex justify-between text-xs">
+                        <span className={b.ok ? 'text-stone-400' : 'text-stone-600'}>{b.label}</span>
+                        <span className={b.ok ? 'text-green-400' : 'text-red-600'}>{b.wert}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {ipoMoeglich && !ipoConfirm && (
+                    <button
+                      onClick={() => setIpoConfirm(true)}
+                      className="w-full py-2 text-xs border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors"
+                    >
+                      An die Börse bringen →
+                    </button>
+                  )}
+
+                  {ipoMoeglich && ipoConfirm && (
+                    <div className="space-y-2">
+                      <div className="border border-stone-700 p-3 space-y-1.5 text-xs">
+                        <div className="flex justify-between">
+                          <span className="text-stone-500">Fixgebühr + Wirtschaftsprüfer</span>
+                          <span className="text-red-400 font-mono">−40.000 ℛℳ</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-stone-500">Variable Gebühr (3 % von {formatMoney(firmenwert)})</span>
+                          <span className="text-red-400 font-mono">−{formatMoney(ipoKosten - 40000)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-stone-500">Emissionserlös (Aktienausgabe)</span>
+                          <span className="text-green-400 font-mono">+{formatMoney(emissionserloes)}</span>
+                        </div>
+                        <div className="flex justify-between border-t border-stone-700 pt-1.5 font-bold">
+                          <span className="text-stone-300">Netto-Effekt</span>
+                          <span className={ipoNetto >= 0 ? 'text-green-400 font-mono' : 'text-red-400 font-mono'}>
+                            {ipoNetto >= 0 ? '+' : ''}{formatMoney(ipoNetto)}
+                          </span>
+                        </div>
+                        <p className="text-stone-600 pt-1">
+                          Laufend: 10 % des monatlichen Gewinns als Dividende.
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleIpo}
+                          className="flex-1 py-2 text-xs bg-amber-700 hover:bg-amber-600 text-amber-50 font-bold transition-colors"
+                        >
+                          Jetzt an die Börse!
+                        </button>
+                        <button
+                          onClick={() => setIpoConfirm(false)}
+                          className="px-4 py-2 text-xs text-stone-500 hover:text-stone-300 border border-stone-700"
+                        >
+                          Abbrechen
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

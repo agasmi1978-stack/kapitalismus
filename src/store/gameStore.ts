@@ -172,6 +172,7 @@ export interface GameState {
   buyRivalCompany: (rivalId: string) => string | null
   makeDecision: (decisionId: string, optionId: string) => void
   proposeCooperation: (rivalId: string, branch: Branch) => string | null
+  listCompany: (companyId: string) => string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -361,8 +362,29 @@ export const useGameStore = create<GameState>((set, get) => ({
       }
     })
 
+    // 8b. Dividende für börsennotierte Firmen (10 % des Gewinns an Aktionäre)
+    let dividendTotal = 0
+    companiesWithRevenue.forEach(c => {
+      if (c.listed) {
+        const profit = c.revenue - c.expenses
+        if (profit > 0) dividendTotal += Math.round(profit * 0.10)
+      }
+    })
+    capital -= dividendTotal
+
+    // 8c. Share-Preise aktualisieren (basierend auf Gewinnmarge + Markt)
+    const companiesWithUpdatedShares = companiesWithRevenue.map(c => {
+      if (!c.listed) return c
+      const profit = c.revenue - c.expenses
+      const profitMargin = c.revenue > 0 ? profit / c.revenue : 0
+      const marketFactor = (newMarketPrices[c.branch] ?? 1.0) - 1.0
+      const priceChange = profitMargin * 0.08 + marketFactor * 0.05 + (Math.random() - 0.5) * 0.04
+      const newSharePrice = Math.max(1, Math.round(c.sharePrice * (1 + priceChange) * 100) / 100)
+      return { ...c, sharePrice: newSharePrice }
+    })
+
     // 9. KI-Rivalen
-    const playerNetWorth = capital + companiesWithRevenue.reduce((s, c) => s + c.revenue * 12, 0)
+    const playerNetWorth = capital + companiesWithUpdatedShares.reduce((s, c) => s + c.revenue * 12, 0)
     const { updatedRivals, events: rivalEvents } = updateRivals(state.rivals, newMarketPrices, playerNetWorth)
 
     // 10. News-Queue
@@ -380,11 +402,11 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // 13. Meilensteine
     const newMilestones = [...state.achievedMilestones]
-    const netWorth = capital + companiesWithRevenue.reduce((s, c) => s + c.revenue * 12, 0)
-    const totalEmployees = companiesWithRevenue.reduce((s, c) => s + c.employees.length, 0)
-    const uniqueBranches = new Set(companiesWithRevenue.map(c => c.branch)).size
-    const uniqueCities = new Set(companiesWithRevenue.map(c => c.cityId)).size
-    const uniqueCountries = new Set(companiesWithRevenue.map(c => CITIES.find(ci => ci.id === c.cityId)?.country)).size
+    const netWorth = capital + companiesWithUpdatedShares.reduce((s, c) => s + c.revenue * 12, 0)
+    const totalEmployees = companiesWithUpdatedShares.reduce((s, c) => s + c.employees.length, 0)
+    const uniqueBranches = new Set(companiesWithUpdatedShares.map(c => c.branch)).size
+    const uniqueCities = new Set(companiesWithUpdatedShares.map(c => c.cityId)).size
+    const uniqueCountries = new Set(companiesWithUpdatedShares.map(c => CITIES.find(ci => ci.id === c.cityId)?.country)).size
 
     const milestoneChecks = [
       { id: 'erste_erweiterung', met: companiesWithRevenue.length >= 2 },
@@ -428,8 +450,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // 16. Victory prüfen
     if (state.victoryCondition !== 'endlos') {
-      const uniqueCitiesV = new Set(companiesWithRevenue.map(c => c.cityId)).size
-      const uniqueBranchesV = new Set(companiesWithRevenue.map(c => c.branch)).size
+      const uniqueCitiesV = new Set(companiesWithUpdatedShares.map(c => c.cityId)).size
+      const uniqueBranchesV = new Set(companiesWithUpdatedShares.map(c => c.branch)).size
       let victoryMet = false
       if (state.victoryCondition === 'vermoegen' && netWorth >= 5_000_000) victoryMet = true
       if (state.victoryCondition === 'expansion' && uniqueCitiesV >= 8) victoryMet = true
@@ -483,7 +505,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       month,
       year,
       turn: turn + 1,
-      companies: companiesWithRevenue,
+      companies: companiesWithUpdatedShares,
       rivals: updatedRivals,
       marketPrices: newMarketPrices,
       currentNews: newQueue[0] ?? null,
@@ -842,6 +864,41 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     set({ capital, debt, branchBonusOverrides: newBonuses, pendingDecision: null, decisionsMade: [...state.decisionsMade, decisionId] })
+  },
+
+  listCompany: (companyId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    if (company.listed) return 'Diese Firma ist bereits börsennotiert.'
+
+    // Bedingungen prüfen
+    const age = state.turn - company.founded
+    if (age < 12) return `Zu jung. Die Firma muss mindestens 12 Monate bestehen (aktuell: ${age} Monate).`
+    if (company.revenue <= company.expenses) return 'Die Firma muss monatlich profitabel sein.'
+    if (company.employees.length < 5) return `Mindestens 5 Mitarbeiter erforderlich (aktuell: ${company.employees.length}).`
+    if (company.revenue < 8000) return `Mindestumsatz 8.000 ℛℳ/Monat erforderlich (aktuell: ${Math.round(company.revenue).toLocaleString('de-DE')} ℛℳ).`
+
+    // Kosten: Fixgebühr 40.000 + 3 % des Firmenwertes (revenue × 10)
+    const firmenwert = company.revenue * 10
+    const ipoKosten = 40000 + Math.round(firmenwert * 0.03)
+    if (state.capital < ipoKosten) return `Nicht genug Kapital. Börsengang kostet: ${ipoKosten.toLocaleString('de-DE')} ℛℳ`
+
+    // Emissionserlös: revenue × 8
+    const emissionserloes = Math.round(company.revenue * 8)
+
+    // Initial-Aktienpreis: vereinfacht revenue / 100
+    const initialSharePrice = Math.round(company.revenue / 10)
+
+    set({
+      capital: state.capital - ipoKosten + emissionserloes,
+      companies: state.companies.map(c =>
+        c.id !== companyId
+          ? c
+          : { ...c, listed: true, sharePrice: initialSharePrice }
+      ),
+    })
+    return null
   },
 
   proposeCooperation: (rivalId, branch) => {
