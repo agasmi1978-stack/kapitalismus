@@ -31,7 +31,9 @@ export default function InvestmentGoodsPanel({ companyId, branch }: { companyId:
   if (!company) return null
 
   const ownedIds = new Set(company.investmentGoods.map(g => g.id))
-  const available = INVESTMENT_GOOD_TEMPLATES.filter(t => t.applicableBranches.includes(branch))
+  const available = INVESTMENT_GOOD_TEMPLATES.filter(t =>
+    t.applicableBranches.includes(branch) && t.type !== 'maschine'
+  )
 
   const handleBuy = (templateId: string, name: string) => {
     const err = buyInvestmentGood(companyId, templateId)
@@ -49,11 +51,11 @@ export default function InvestmentGoodsPanel({ companyId, branch }: { companyId:
   return (
     <div className="space-y-4">
       {/* Besitz */}
-      {company.investmentGoods.length > 0 && (
+      {company.investmentGoods.filter(g => g.type !== 'maschine').length > 0 && (
         <div>
           <p className="text-xs text-stone-500 uppercase tracking-widest mb-2">Im Besitz</p>
           <div className="grid grid-cols-2 gap-2">
-            {company.investmentGoods.map(g => (
+            {company.investmentGoods.filter(g => g.type !== 'maschine').map(g => (
               <div key={g.id} className="bg-stone-800 border border-amber-900 p-3 flex items-center gap-3">
                 <span className="text-xl">{TYPE_ICONS[g.type]}</span>
                 <div>

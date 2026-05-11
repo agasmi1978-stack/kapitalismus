@@ -1,12 +1,15 @@
 import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { BRANCH_LABELS, CITIES } from '../../data/cities'
 import { useGameStore, type Company } from '../../store/gameStore'
 import { useToastStore } from '../../store/toastStore'
 import EmployeePanel from './EmployeePanel'
 import InvestmentGoodsPanel from './InvestmentGoodsPanel'
+import PropertiesPanel from './PropertiesPanel'
+import BetriebPanel from './BetriebPanel'
+import MachinesPanel from './MachinesPanel'
 
-type DetailTab = 'uebersicht' | 'mitarbeiter' | 'investitionen'
+type DetailTab = 'uebersicht' | 'mitarbeiter' | 'investitionen' | 'immobilien' | 'betrieb' | 'maschinen'
 
 function formatMoney(n: number) {
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(2)} Mio. ℛℳ`
@@ -61,13 +64,12 @@ export default function CompanyDetail({
   }
 
   return (
-    <AnimatePresence>
       <motion.div
-        initial={{ x: '100%' }}
-        animate={{ x: 0 }}
-        exit={{ x: '100%' }}
-        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-        className="absolute right-0 top-0 h-full w-full max-w-md bg-stone-900 border-l border-stone-700 flex flex-col z-20 shadow-2xl"
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+        className="absolute bottom-0 left-0 right-0 h-[78%] bg-stone-900 border-t border-stone-700 flex flex-col z-20 shadow-2xl"
       >
         {/* Header */}
         <div className="px-5 pt-5 pb-4 border-b border-stone-700">
@@ -131,7 +133,10 @@ export default function CompanyDetail({
           {([
             { id: 'uebersicht', label: 'Übersicht' },
             { id: 'mitarbeiter', label: `Mitarbeiter (${company.employees.length})` },
-            { id: 'investitionen', label: `Güter (${company.investmentGoods.length})` },
+            { id: 'maschinen', label: `Maschinen (${(company.machines ?? []).length})` },
+          { id: 'investitionen', label: `Güter (${company.investmentGoods.filter(g => g.type !== 'maschine').length})` },
+            { id: 'immobilien', label: `Immobilien (${company.properties.length})` },
+            { id: 'betrieb', label: 'Betrieb' },
           ] as { id: DetailTab; label: string }[]).map(t => (
             <button
               key={t.id}
@@ -280,11 +285,22 @@ export default function CompanyDetail({
             <EmployeePanel companyId={company.id} />
           )}
 
+          {tab === 'maschinen' && (
+            <MachinesPanel companyId={company.id} />
+          )}
+
           {tab === 'investitionen' && (
             <InvestmentGoodsPanel companyId={company.id} branch={company.branch} />
           )}
+
+          {tab === 'immobilien' && (
+            <PropertiesPanel companyId={company.id} />
+          )}
+
+          {tab === 'betrieb' && (
+            <BetriebPanel companyId={company.id} />
+          )}
         </div>
       </motion.div>
-    </AnimatePresence>
   )
 }
