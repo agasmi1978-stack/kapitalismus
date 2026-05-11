@@ -7,8 +7,9 @@ import EmployeePanel from './EmployeePanel'
 import InvestmentGoodsPanel from './InvestmentGoodsPanel'
 import PropertiesPanel from './PropertiesPanel'
 import BetriebPanel from './BetriebPanel'
+import MachinesPanel from './MachinesPanel'
 
-type DetailTab = 'uebersicht' | 'mitarbeiter' | 'investitionen' | 'immobilien' | 'betrieb'
+type DetailTab = 'uebersicht' | 'mitarbeiter' | 'investitionen' | 'immobilien' | 'betrieb' | 'maschinen'
 
 function formatMoney(n: number) {
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(2)} Mio. ℛℳ`
@@ -132,7 +133,8 @@ export default function CompanyDetail({
           {([
             { id: 'uebersicht', label: 'Übersicht' },
             { id: 'mitarbeiter', label: `Mitarbeiter (${company.employees.length})` },
-            { id: 'investitionen', label: `Güter (${company.investmentGoods.length})` },
+            { id: 'maschinen', label: `Maschinen (${(company.machines ?? []).length})` },
+          { id: 'investitionen', label: `Güter (${company.investmentGoods.filter(g => g.type !== 'maschine').length})` },
             { id: 'immobilien', label: `Immobilien (${company.properties.length})` },
             { id: 'betrieb', label: 'Betrieb' },
           ] as { id: DetailTab; label: string }[]).map(t => (
@@ -281,6 +283,10 @@ export default function CompanyDetail({
 
           {tab === 'mitarbeiter' && (
             <EmployeePanel companyId={company.id} />
+          )}
+
+          {tab === 'maschinen' && (
+            <MachinesPanel companyId={company.id} />
           )}
 
           {tab === 'investitionen' && (

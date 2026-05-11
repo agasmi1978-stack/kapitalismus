@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { CITIES, type Branch } from '../data/cities'
 import { INVESTMENT_GOOD_TEMPLATES } from '../data/investmentGoods'
 import { PROPERTY_TEMPLATES } from '../data/properties'
+import { MACHINE_TEMPLATES } from '../data/machineTemplates'
 import { generateEvent, templateToNewsEvent } from '../engine/events'
 import { initMarketPrices, updateMarketPrices, applyMarketToRevenue } from '../engine/market'
 import { spawnInitialRivals, updateRivals } from '../engine/ai'
@@ -94,10 +95,28 @@ export interface Property {
   name: string
   cityId: string        // physischer Standort (Stadt)
   employeeSlots: number
-  machineSlots: number  // für Phase 2 (Maschinen)
+  machineSlots: number
   maintenanceCost: number
   managerId: string | null
   purchasedAt: number
+}
+
+export interface Machine {
+  id: string
+  templateId: string
+  name: string
+  propertyId: string
+  machineSize: number
+  minWorkers: number
+  minSpecialists: number
+  requiresManager: boolean
+  managerId: string | null
+  assignedWorkerIds: string[]
+  assignedSpecialistIds: string[]
+  maxBonus: number
+  maturityTurns: number
+  purchasedAt: number
+  transferredAt: number | null  // Runde des letzten Transfers; null = nie transferiert
 }
 
 export interface Company {
@@ -105,12 +124,13 @@ export interface Company {
   name: string
   branch: Branch
   cityId: string
-  baseRevenue: number   // Grundumsatz ohne Mitarbeiter/Güter
-  revenue: number       // Gesamtumsatz (dynamisch berechnet & gespeichert)
+  baseRevenue: number
+  revenue: number
   expenses: number
   employees: Employee[]
   investmentGoods: InvestmentGood[]
   properties: Property[]
+  machines: Machine[]
   listed: boolean
   sharePrice: number
   founded: number
@@ -195,6 +215,12 @@ export interface GameState {
   assignEmployee: (companyId: string, employeeId: string, propertyId: string) => string | null
   unassignEmployee: (companyId: string, employeeId: string) => void
   transferEmployee: (fromCompanyId: string, employeeId: string, toCompanyId: string, toPropertyId: string) => string | null
+  buyMachine: (companyId: string, templateId: string, propertyId: string) => string | null
+  assignWorkerToMachine: (companyId: string, machineId: string, employeeId: string) => string | null
+  removeWorkerFromMachine: (companyId: string, machineId: string, employeeId: string) => void
+  assignMachineManager: (companyId: string, machineId: string, managerId: string) => string | null
+  removeMachineManager: (companyId: string, machineId: string) => void
+  transferMachine: (companyId: string, machineId: string, toPropertyId: string) => string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +260,29 @@ export function calcTransferInfo(fromCityId: string, toCityId: string): { cost: 
   }
 }
 
+/** Effizienz einer Maschine: Bestückung × Transfer-Einlaufen */
+export function computeMachineEfficiency(machine: Machine, company: Company, turn: number): number {
+  const workers = machine.assignedWorkerIds.length
+  const specialists = machine.assignedSpecialistIds.length
+
+  // Mindestbesetzung prüfen
+  if (workers < machine.minWorkers || specialists < machine.minSpecialists) return 0
+
+  // Manager-Pflicht prüfen
+  const hasManager = machine.managerId !== null &&
+    company.employees.some(e => e.id === machine.managerId && e.level === 'manager')
+  let staffingEff = machine.requiresManager && !hasManager ? 0.5 : 1.0
+
+  // Transfer-Einlauf-Faktor (Option B: 20 % → 60 % → 100 % über 2 Monate)
+  let transferFactor = 1.0
+  if (machine.transferredAt !== null) {
+    const elapsed = turn - machine.transferredAt
+    transferFactor = Math.min(1.0, 0.2 + elapsed * 0.4)
+  }
+
+  return Math.round(staffingEff * transferFactor * 100)
+}
+
 function rollLaborMarket(): Record<EmployeeLevel, boolean> {
   return {
     arbeiter: Math.random() < LABOR_MARKET_CHANCE.arbeiter,
@@ -244,19 +293,29 @@ function rollLaborMarket(): Record<EmployeeLevel, boolean> {
 
 /** Berechnet den aktuellen Gesamtumsatz einer Firma dynamisch */
 function computeCompanyRevenue(company: Company, turn: number): number {
-  // Nur zugewiesene Mitarbeiter (propertyId !== null) erzeugen Umsatz
   const empRevenue = company.employees.reduce((sum, e) => {
     if (!e.propertyId) return sum
     return sum + Math.round(REVENUE_PER_EMPLOYEE[e.level] * (e.productivity / 100))
   }, 0)
 
-  const goodsRevenue = company.investmentGoods.reduce((sum, g) => {
-    const monthsOwned = Math.max(0, turn - g.purchasedAt)
-    const maturity = Math.min(1.0, 0.2 + (monthsOwned / Math.max(1, g.maturityTurns)) * 0.8)
-    return sum + Math.round(g.maxBonus * maturity)
+  // Nur Nicht-Maschinen InvestmentGoods (Maschinen haben eigenen Panel/System)
+  const goodsRevenue = (company.investmentGoods ?? [])
+    .filter(g => g.type !== 'maschine')
+    .reduce((sum, g) => {
+      const monthsOwned = Math.max(0, turn - g.purchasedAt)
+      const maturity = Math.min(1.0, 0.2 + (monthsOwned / Math.max(1, g.maturityTurns)) * 0.8)
+      return sum + Math.round(g.maxBonus * maturity)
+    }, 0)
+
+  const machineRevenue = (company.machines ?? []).reduce((sum, m) => {
+    const eff = computeMachineEfficiency(m, company, turn)
+    if (eff === 0) return sum
+    const monthsOwned = Math.max(0, turn - m.purchasedAt)
+    const maturity = Math.min(1.0, 0.2 + (monthsOwned / Math.max(1, m.maturityTurns)) * 0.8)
+    return sum + Math.round(m.maxBonus * maturity * (eff / 100))
   }, 0)
 
-  return (company.baseRevenue ?? 1500) + empRevenue + goodsRevenue
+  return (company.baseRevenue ?? 1500) + empRevenue + goodsRevenue + machineRevenue
 }
 
 const STARTING_CAPITAL = 30000
@@ -330,11 +389,12 @@ export const useGameStore = create<GameState>((set, get) => ({
       branch: startBranch,
       cityId: startCityId,
       baseRevenue: 1000,
-      revenue: 2600,  // wird in endTurn neu berechnet
-      expenses: startingSalaries + startingHQ.maintenanceCost, // 1200 + 400 = 1600
+      revenue: 2600,
+      expenses: startingSalaries + startingHQ.maintenanceCost,
       employees: startingEmployees,
       investmentGoods: [],
       properties: [startingHQ],
+      machines: [],
       listed: false,
       sharePrice: 100,
       founded: 0,
@@ -652,11 +712,20 @@ export const useGameStore = create<GameState>((set, get) => ({
           productivity: e.productivity ?? 100,
           propertyId: e.propertyId ?? null,
         })),
-        investmentGoods: (c.investmentGoods ?? []).map((g: InvestmentGood) => ({
-          ...g,
-          maxBonus: g.maxBonus ?? (g as unknown as { capacityBonus?: number }).capacityBonus ?? 0,
-          maturityTurns: g.maturityTurns ?? 6,
-          purchasedAt: g.purchasedAt ?? 0,
+        investmentGoods: (c.investmentGoods ?? [])
+          .filter((g: InvestmentGood) => g.type !== 'maschine')
+          .map((g: InvestmentGood) => ({
+            ...g,
+            maxBonus: g.maxBonus ?? (g as unknown as { capacityBonus?: number }).capacityBonus ?? 0,
+            maturityTurns: g.maturityTurns ?? 6,
+            purchasedAt: g.purchasedAt ?? 0,
+          })),
+        machines: (c.machines ?? []).map((m: Machine) => ({
+          ...m,
+          transferredAt: m.transferredAt ?? null,
+          assignedWorkerIds: m.assignedWorkerIds ?? [],
+          assignedSpecialistIds: m.assignedSpecialistIds ?? [],
+          managerId: m.managerId ?? null,
         })),
         // Alte Saves ohne properties bekommen ein Standard-HQ
         properties: (c.properties ?? []).length > 0
@@ -888,10 +957,11 @@ export const useGameStore = create<GameState>((set, get) => ({
       cityId,
       baseRevenue: 1500,
       revenue: 1500,
-      expenses: 400 + buero.maintenanceCost, // 900
+      expenses: 400 + buero.maintenanceCost,
       employees: [],
       investmentGoods: [],
       properties: [buero],
+      machines: [],
       listed: false,
       sharePrice: 100,
       founded: state.turn,
@@ -976,6 +1046,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       employees: [],
       investmentGoods: [],
       properties: [acquiredProperty],
+      machines: [],
       listed: false,
       sharePrice: 100,
       founded: state.turn,
@@ -1257,6 +1328,182 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({
       capital: state.capital - COST,
       activeCooperations: [...state.activeCooperations, { rivalId, rivalName: rival.name, branch, turnsLeft: 12 }],
+    })
+    return null
+  },
+
+  buyMachine: (companyId, templateId, propertyId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    const template = MACHINE_TEMPLATES.find(t => t.id === templateId)
+    if (!company) return 'Firma nicht gefunden.'
+    if (!template) return 'Maschine nicht gefunden.'
+    if (!template.applicableBranches.includes(company.branch)) return 'Diese Maschine passt nicht zur Branche.'
+    if (state.capital < template.cost) return `Nicht genug Kapital. Kosten: ${template.cost.toLocaleString('de-DE')} ℛℳ`
+    const property = company.properties.find(p => p.id === propertyId)
+    if (!property) return 'Standort nicht gefunden.'
+
+    const usedMachineSlots = (company.machines ?? [])
+      .filter(m => m.propertyId === propertyId)
+      .reduce((s, m) => s + m.machineSize, 0)
+    if (usedMachineSlots + template.machineSize > property.machineSlots) {
+      return `Nicht genug Maschineneinheiten (benötigt: ${template.machineSize}, verfügbar: ${property.machineSlots - usedMachineSlots}).`
+    }
+
+    const machine: Machine = {
+      id: `mach-${Math.random().toString(36).slice(2, 9)}`,
+      templateId: template.id,
+      name: template.name,
+      propertyId,
+      machineSize: template.machineSize,
+      minWorkers: template.minWorkers,
+      minSpecialists: template.minSpecialists,
+      requiresManager: template.requiresManager,
+      managerId: null,
+      assignedWorkerIds: [],
+      assignedSpecialistIds: [],
+      maxBonus: template.maxBonus,
+      maturityTurns: template.maturityTurns,
+      purchasedAt: state.turn,
+      transferredAt: null,
+    }
+
+    set({
+      capital: state.capital - template.cost,
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : { ...c, machines: [...(c.machines ?? []), machine] }
+      ),
+    })
+    return null
+  },
+
+  assignWorkerToMachine: (companyId, machineId, employeeId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    const machine = (company.machines ?? []).find(m => m.id === machineId)
+    if (!machine) return 'Maschine nicht gefunden.'
+    const employee = company.employees.find(e => e.id === employeeId)
+    if (!employee) return 'Mitarbeiter nicht gefunden.'
+    if (employee.level === 'manager') return 'Manager werden nicht als Arbeiter/Fachkraft an Maschinen eingesetzt.'
+
+    if (employee.level === 'arbeiter') {
+      if (machine.assignedWorkerIds.includes(employeeId)) return 'Bereits an dieser Maschine eingeteilt.'
+      set({
+        companies: state.companies.map(c =>
+          c.id !== companyId ? c : {
+            ...c,
+            machines: (c.machines ?? []).map(m =>
+              m.id !== machineId ? m : { ...m, assignedWorkerIds: [...m.assignedWorkerIds, employeeId] }
+            ),
+          }
+        ),
+      })
+    } else {
+      if (machine.assignedSpecialistIds.includes(employeeId)) return 'Bereits an dieser Maschine eingeteilt.'
+      set({
+        companies: state.companies.map(c =>
+          c.id !== companyId ? c : {
+            ...c,
+            machines: (c.machines ?? []).map(m =>
+              m.id !== machineId ? m : { ...m, assignedSpecialistIds: [...m.assignedSpecialistIds, employeeId] }
+            ),
+          }
+        ),
+      })
+    }
+    return null
+  },
+
+  removeWorkerFromMachine: (companyId, machineId, employeeId) => {
+    const state = get()
+    set({
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          machines: (c.machines ?? []).map(m =>
+            m.id !== machineId ? m : {
+              ...m,
+              assignedWorkerIds: m.assignedWorkerIds.filter(id => id !== employeeId),
+              assignedSpecialistIds: m.assignedSpecialistIds.filter(id => id !== employeeId),
+            }
+          ),
+        }
+      ),
+    })
+  },
+
+  assignMachineManager: (companyId, machineId, managerId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    const employee = company.employees.find(e => e.id === managerId)
+    if (!employee || employee.level !== 'manager') return 'Nur Manager können eine Maschine leiten.'
+    set({
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          machines: (c.machines ?? []).map(m =>
+            m.id !== machineId ? m : { ...m, managerId }
+          ),
+        }
+      ),
+    })
+    return null
+  },
+
+  removeMachineManager: (companyId, machineId) => {
+    const state = get()
+    set({
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          machines: (c.machines ?? []).map(m =>
+            m.id !== machineId ? m : { ...m, managerId: null }
+          ),
+        }
+      ),
+    })
+  },
+
+  transferMachine: (companyId, machineId, toPropertyId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    const machine = (company.machines ?? []).find(m => m.id === machineId)
+    if (!machine) return 'Maschine nicht gefunden.'
+    const toProperty = company.properties.find(p => p.id === toPropertyId)
+    if (!toProperty) return 'Zielstandort nicht gefunden.'
+    if (machine.propertyId === toPropertyId) return 'Maschine ist bereits an diesem Standort.'
+
+    const usedAtTarget = (company.machines ?? [])
+      .filter(m => m.propertyId === toPropertyId && m.id !== machineId)
+      .reduce((s, m) => s + m.machineSize, 0)
+    if (usedAtTarget + machine.machineSize > toProperty.machineSlots) {
+      return `Zielstandort hat nicht genug freie Maschineneinheiten (benötigt: ${machine.machineSize}, verfügbar: ${toProperty.machineSlots - usedAtTarget}).`
+    }
+
+    const fromProperty = company.properties.find(p => p.id === machine.propertyId)
+    const { cost } = calcTransferInfo(fromProperty?.cityId ?? company.cityId, toProperty.cityId)
+    if (state.capital < cost) return `Nicht genug Kapital. Transferkosten: ${cost.toLocaleString('de-DE')} ℛℳ`
+
+    set({
+      capital: state.capital - cost,
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          machines: (c.machines ?? []).map(m =>
+            m.id !== machineId ? m : {
+              ...m,
+              propertyId: toPropertyId,
+              transferredAt: state.turn,
+              assignedWorkerIds: [],
+              assignedSpecialistIds: [],
+              managerId: null,
+            }
+          ),
+        }
+      ),
     })
     return null
   },
