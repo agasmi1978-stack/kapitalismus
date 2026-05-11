@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { CITIES, type Branch } from '../data/cities'
 import { INVESTMENT_GOOD_TEMPLATES } from '../data/investmentGoods'
+import { PROPERTY_TEMPLATES } from '../data/properties'
 import { generateEvent, templateToNewsEvent } from '../engine/events'
 import { initMarketPrices, updateMarketPrices, applyMarketToRevenue } from '../engine/market'
 import { spawnInitialRivals, updateRivals } from '../engine/ai'
@@ -74,6 +75,7 @@ export interface Employee {
   skill: number
   hiredAt: number       // Runde, in der eingestellt
   productivity: number  // 50–100, wächst über Zeit
+  propertyId: string | null  // zugewiesener Standort (null = unzugewiesener Pool)
 }
 
 export interface InvestmentGood {
@@ -86,6 +88,18 @@ export interface InvestmentGood {
   purchasedAt: number   // Runde des Kaufs
 }
 
+export interface Property {
+  id: string
+  templateId: string    // 'firmensitz' | PROPERTY_TEMPLATES[*].id
+  name: string
+  cityId: string        // physischer Standort (Stadt)
+  employeeSlots: number
+  machineSlots: number  // für Phase 2 (Maschinen)
+  maintenanceCost: number
+  managerId: string | null
+  purchasedAt: number
+}
+
 export interface Company {
   id: string
   name: string
@@ -96,6 +110,7 @@ export interface Company {
   expenses: number
   employees: Employee[]
   investmentGoods: InvestmentGood[]
+  properties: Property[]
   listed: boolean
   sharePrice: number
   founded: number
@@ -160,7 +175,7 @@ export interface GameState {
   dismissNews: () => void
   saveGame: () => void
   loadGame: (data: unknown) => void
-  hireEmployee: (companyId: string, level: EmployeeLevel) => string | null
+  hireEmployee: (companyId: string, level: EmployeeLevel, propertyId: string) => string | null
   fireEmployee: (companyId: string, employeeId: string) => void
   trainEmployee: (companyId: string, employeeId: string) => string | null
   setSalary: (companyId: string, employeeId: string, salary: number) => void
@@ -174,11 +189,50 @@ export interface GameState {
   makeDecision: (decisionId: string, optionId: string) => void
   proposeCooperation: (rivalId: string, branch: Branch) => string | null
   listCompany: (companyId: string) => string | null
+  buyProperty: (companyId: string, templateId: string, cityId: string) => string | null
+  assignPropertyManager: (companyId: string, propertyId: string, employeeId: string) => string | null
+  removePropertyManager: (companyId: string, propertyId: string) => void
+  assignEmployee: (companyId: string, employeeId: string, propertyId: string) => string | null
+  unassignEmployee: (companyId: string, employeeId: string) => void
+  transferEmployee: (fromCompanyId: string, employeeId: string, toCompanyId: string, toPropertyId: string) => string | null
 }
 
 // ---------------------------------------------------------------------------
 // Hilfsfunktionen
 // ---------------------------------------------------------------------------
+
+/** Effizienz eines Managers: 1 / Anzahl der von ihm geleiteten Immobilien */
+export function computeManagerEfficiency(company: Company, managerId: string): number {
+  const count = company.properties.filter(p => p.managerId === managerId).length
+  return count === 0 ? 0 : Math.round((1 / count) * 100)
+}
+
+/** Gesamte Mitarbeiterkapazität aller Immobilien einer Firma */
+export function totalEmployeeSlots(company: Company): number {
+  return company.properties.reduce((sum, p) => sum + p.employeeSlots, 0)
+}
+
+/** Anzahl zugewiesener Mitarbeiter an einem Standort */
+export function assignedEmployeeCount(company: Company, propertyId: string): number {
+  return company.employees.filter(e => e.propertyId === propertyId).length
+}
+
+/** Transferkosten und neue Produktivität bei Versetzung */
+export function calcTransferInfo(fromCityId: string, toCityId: string): { cost: number; newProductivity: number } {
+  if (fromCityId === toCityId) {
+    return { cost: 800, newProductivity: 70 }
+  }
+  const from = CITIES.find(c => c.id === fromCityId)
+  const to = CITIES.find(c => c.id === toCityId)
+  if (!from || !to) return { cost: 1500, newProductivity: 60 }
+  const dx = from.coordinates[0] - to.coordinates[0]
+  const dy = from.coordinates[1] - to.coordinates[1]
+  const dist = Math.sqrt(dx * dx + dy * dy)
+  return {
+    cost: Math.round(500 + dist * 350),
+    newProductivity: Math.max(40, Math.round(75 - dist * 4)),
+  }
+}
 
 function rollLaborMarket(): Record<EmployeeLevel, boolean> {
   return {
@@ -190,7 +244,9 @@ function rollLaborMarket(): Record<EmployeeLevel, boolean> {
 
 /** Berechnet den aktuellen Gesamtumsatz einer Firma dynamisch */
 function computeCompanyRevenue(company: Company, turn: number): number {
+  // Nur zugewiesene Mitarbeiter (propertyId !== null) erzeugen Umsatz
   const empRevenue = company.employees.reduce((sum, e) => {
+    if (!e.propertyId) return sum
     return sum + Math.round(REVENUE_PER_EMPLOYEE[e.level] * (e.productivity / 100))
   }, 0)
 
@@ -248,16 +304,37 @@ export const useGameStore = create<GameState>((set, get) => ({
     const { startCityId, startBranch, playerName } = get()
     if (!startCityId || !startBranch || !playerName) return
 
+    // Übernommenes Unternehmen: Firmensitz + kleine Stammbelegschaft
+    const startingHQ: Property = {
+      id: 'prop-hq',
+      templateId: 'firmensitz',
+      name: `${playerName} & Co. Stammhaus`,
+      cityId: startCityId,
+      employeeSlots: 12,
+      machineSlots: 10,
+      maintenanceCost: 400,
+      managerId: null,
+      purchasedAt: 0,
+    }
+
+    const startingEmployees: Employee[] = [
+      { id: newEmployeeId(), level: 'arbeiter', salary: 300, morale: 70, skill: 40, hiredAt: 0, productivity: 80, propertyId: 'prop-hq' },
+      { id: newEmployeeId(), level: 'arbeiter', salary: 300, morale: 70, skill: 40, hiredAt: 0, productivity: 80, propertyId: 'prop-hq' },
+      { id: newEmployeeId(), level: 'fachkraft', salary: 600, morale: 75, skill: 60, hiredAt: 0, productivity: 80, propertyId: 'prop-hq' },
+    ]
+    const startingSalaries = startingEmployees.reduce((s, e) => s + e.salary, 0) // 1200
+
     const startingCompany: Company = {
       id: 'company-start',
       name: `${playerName} & Co.`,
       branch: startBranch,
       cityId: startCityId,
-      baseRevenue: 2500,
-      revenue: 2500,
-      expenses: 1400,
-      employees: [],
+      baseRevenue: 1000,
+      revenue: 2600,  // wird in endTurn neu berechnet
+      expenses: startingSalaries + startingHQ.maintenanceCost, // 1200 + 400 = 1600
+      employees: startingEmployees,
       investmentGoods: [],
+      properties: [startingHQ],
       listed: false,
       sharePrice: 100,
       founded: 0,
@@ -564,22 +641,45 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   loadGame: (data: unknown) => {
     const d = data as Partial<GameState>
-    // Rückwärtskompatibilität: alte Saves ohne baseRevenue/productivity normalisieren
-    const companies = (d.companies ?? []).map((c: Company) => ({
-      ...c,
-      baseRevenue: c.baseRevenue ?? c.revenue ?? 1500,
-      employees: (c.employees ?? []).map((e: Employee) => ({
-        ...e,
-        hiredAt: e.hiredAt ?? 0,
-        productivity: e.productivity ?? 100,
-      })),
-      investmentGoods: (c.investmentGoods ?? []).map((g: InvestmentGood) => ({
-        ...g,
-        maxBonus: g.maxBonus ?? (g as unknown as { capacityBonus?: number }).capacityBonus ?? 0,
-        maturityTurns: g.maturityTurns ?? 6,
-        purchasedAt: g.purchasedAt ?? 0,
-      })),
-    }))
+    // Rückwärtskompatibilität: alte Saves normalisieren
+    const companies = (d.companies ?? []).map((c: Company) => {
+      const normalized = {
+        ...c,
+        baseRevenue: c.baseRevenue ?? c.revenue ?? 1500,
+        employees: (c.employees ?? []).map((e: Employee) => ({
+          ...e,
+          hiredAt: e.hiredAt ?? 0,
+          productivity: e.productivity ?? 100,
+          propertyId: e.propertyId ?? null,
+        })),
+        investmentGoods: (c.investmentGoods ?? []).map((g: InvestmentGood) => ({
+          ...g,
+          maxBonus: g.maxBonus ?? (g as unknown as { capacityBonus?: number }).capacityBonus ?? 0,
+          maturityTurns: g.maturityTurns ?? 6,
+          purchasedAt: g.purchasedAt ?? 0,
+        })),
+        // Alte Saves ohne properties bekommen ein Standard-HQ
+        properties: (c.properties ?? []).length > 0
+          ? (c.properties ?? []).map((p: Property) => ({
+              ...p,
+              cityId: p.cityId ?? c.cityId,
+              machineSlots: p.machineSlots ?? 10,
+              managerId: p.managerId ?? null,
+            }))
+          : [{
+              id: `prop-legacy-${c.id}`,
+              templateId: 'firmensitz',
+              name: `${c.name} HQ`,
+              cityId: c.cityId,
+              employeeSlots: Math.max(15, (c.employees ?? []).length),
+              machineSlots: 10,
+              maintenanceCost: 400,
+              managerId: null,
+              purchasedAt: 0,
+            } as Property],
+      }
+      return normalized
+    })
     set({
       phase: d.phase ?? 'playing',
       turn: d.turn ?? 0,
@@ -603,8 +703,18 @@ export const useGameStore = create<GameState>((set, get) => ({
     })
   },
 
-  hireEmployee: (companyId, level) => {
+  hireEmployee: (companyId, level, propertyId) => {
     const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+
+    // Kapazitätsprüfung pro Standort
+    const property = company.properties.find(p => p.id === propertyId)
+    if (!property) return 'Standort nicht gefunden.'
+    const used = assignedEmployeeCount(company, propertyId)
+    if (used >= property.employeeSlots) {
+      return `Standort voll (${used}/${property.employeeSlots} Plätze). Kaufe eine größere Immobilie oder verschiebe Mitarbeiter.`
+    }
 
     // Arbeitsmarkt prüfen
     if (!state.laborMarketAvailability[level]) {
@@ -629,6 +739,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       skill: level === 'manager' ? 80 : level === 'fachkraft' ? 60 : 40,
       hiredAt: state.turn,
       productivity: 50, // startet bei 50 %, wächst auf 100 % in ~8 Monaten
+      propertyId,
     }
 
     const updatedCompanies = state.companies.map(c => {
@@ -756,6 +867,20 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get()
     if (state.capital < FOUND_COST) return `Nicht genug Kapital. Gründungskosten: ${FOUND_COST.toLocaleString('de-DE')} ℛℳ`
     if (!state.unlockedCities.includes(cityId)) return 'Diese Stadt ist noch nicht erschlossen.'
+
+    // Gründung schließt ein kleines Büro ein
+    const buero: Property = {
+      id: `prop-${Math.random().toString(36).slice(2, 9)}`,
+      templateId: 'kleines_buero',
+      name: `${name} Büro`,
+      cityId,
+      employeeSlots: 15,
+      machineSlots: 10,
+      maintenanceCost: 500,
+      managerId: null,
+      purchasedAt: state.turn,
+    }
+
     const company: Company = {
       id: newCompanyId(),
       name,
@@ -763,9 +888,10 @@ export const useGameStore = create<GameState>((set, get) => ({
       cityId,
       baseRevenue: 1500,
       revenue: 1500,
-      expenses: 900,
+      expenses: 400 + buero.maintenanceCost, // 900
       employees: [],
       investmentGoods: [],
+      properties: [buero],
       listed: false,
       sharePrice: 100,
       founded: state.turn,
@@ -827,6 +953,18 @@ export const useGameStore = create<GameState>((set, get) => ({
     const cityId = rival.cities[0] ?? state.unlockedCities[0]
     const baseRev = Math.round(price / 15)
 
+    const acquiredProperty: Property = {
+      id: `prop-${Math.random().toString(36).slice(2, 9)}`,
+      templateId: 'kleines_buero',
+      name: 'Übernommenes Büro',
+      cityId,
+      employeeSlots: 15,
+      machineSlots: 10,
+      maintenanceCost: 500,
+      managerId: null,
+      purchasedAt: state.turn,
+    }
+
     const acquiredCompany: Company = {
       id: newCompanyId(),
       name: `${rival.name.split(' ')[1] ?? rival.name} Übernahme`,
@@ -837,6 +975,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       expenses: Math.round(price / 25),
       employees: [],
       investmentGoods: [],
+      properties: [acquiredProperty],
       listed: false,
       sharePrice: 100,
       founded: state.turn,
@@ -918,6 +1057,186 @@ export const useGameStore = create<GameState>((set, get) => ({
           : { ...c, listed: true, sharePrice: initialSharePrice }
       ),
     })
+    return null
+  },
+
+  buyProperty: (companyId, templateId, cityId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    const template = PROPERTY_TEMPLATES.find(t => t.id === templateId)
+    if (!company) return 'Firma nicht gefunden.'
+    if (!template) return 'Immobilie nicht gefunden.'
+    if (!state.unlockedCities.includes(cityId)) return 'Diese Stadt ist nicht erschlossen.'
+    if (template.applicableBranches.length > 0 && !template.applicableBranches.includes(company.branch)) {
+      return 'Diese Immobilie passt nicht zur Branche der Firma.'
+    }
+    if (state.capital < template.cost) {
+      return `Nicht genug Kapital. Kosten: ${template.cost.toLocaleString('de-DE')} ℛℳ`
+    }
+
+    const city = CITIES.find(c => c.id === cityId)
+    const newProperty: Property = {
+      id: `prop-${Math.random().toString(36).slice(2, 9)}`,
+      templateId: template.id,
+      name: `${template.name} (${city?.name ?? cityId})`,
+      cityId,
+      employeeSlots: template.employeeSlots,
+      machineSlots: template.machineSlots,
+      maintenanceCost: template.maintenanceCost,
+      managerId: null,
+      purchasedAt: state.turn,
+    }
+
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      return {
+        ...c,
+        properties: [...c.properties, newProperty],
+        expenses: c.expenses + template.maintenanceCost,
+      }
+    })
+
+    set({ capital: state.capital - template.cost, companies: updatedCompanies })
+    return null
+  },
+
+  assignPropertyManager: (companyId, propertyId, employeeId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    const property = company.properties.find(p => p.id === propertyId)
+    if (!property) return 'Immobilie nicht gefunden.'
+    const employee = company.employees.find(e => e.id === employeeId)
+    if (!employee) return 'Mitarbeiter nicht gefunden.'
+    if (employee.level !== 'manager') return 'Nur Manager können eine Immobilie leiten.'
+
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id !== companyId) return c
+      return {
+        ...c,
+        properties: c.properties.map(p =>
+          p.id === propertyId ? { ...p, managerId: employeeId } : p
+        ),
+      }
+    })
+    set({ companies: updatedCompanies })
+    return null
+  },
+
+  removePropertyManager: (companyId, propertyId) => {
+    const state = get()
+    set({
+      companies: state.companies.map(c => {
+        if (c.id !== companyId) return c
+        return {
+          ...c,
+          properties: c.properties.map(p =>
+            p.id === propertyId ? { ...p, managerId: null } : p
+          ),
+        }
+      }),
+    })
+  },
+
+  assignEmployee: (companyId, employeeId, propertyId) => {
+    const state = get()
+    const company = state.companies.find(c => c.id === companyId)
+    if (!company) return 'Firma nicht gefunden.'
+    const property = company.properties.find(p => p.id === propertyId)
+    if (!property) return 'Standort nicht gefunden.'
+    const employee = company.employees.find(e => e.id === employeeId)
+    if (!employee) return 'Mitarbeiter nicht gefunden.'
+    if (employee.propertyId) return 'Mitarbeiter ist bereits einem Standort zugewiesen. Erst abziehen oder versetzen.'
+    const used = assignedEmployeeCount(company, propertyId)
+    if (used >= property.employeeSlots) {
+      return `Standort voll (${used}/${property.employeeSlots} Plätze).`
+    }
+    set({
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          employees: c.employees.map(e =>
+            e.id === employeeId ? { ...e, propertyId } : e
+          ),
+        }
+      ),
+    })
+    return null
+  },
+
+  unassignEmployee: (companyId, employeeId) => {
+    const state = get()
+    set({
+      companies: state.companies.map(c =>
+        c.id !== companyId ? c : {
+          ...c,
+          employees: c.employees.map(e =>
+            e.id === employeeId ? { ...e, propertyId: null } : e
+          ),
+        }
+      ),
+    })
+  },
+
+  transferEmployee: (fromCompanyId, employeeId, toCompanyId, toPropertyId) => {
+    const state = get()
+    const fromCompany = state.companies.find(c => c.id === fromCompanyId)
+    const toCompany = state.companies.find(c => c.id === toCompanyId)
+    if (!fromCompany || !toCompany) return 'Firma nicht gefunden.'
+    const employee = fromCompany.employees.find(e => e.id === employeeId)
+    if (!employee) return 'Mitarbeiter nicht gefunden.'
+    const toProperty = toCompany.properties.find(p => p.id === toPropertyId)
+    if (!toProperty) return 'Zielstandort nicht gefunden.'
+
+    // Kapazität prüfen
+    const usedAtTarget = assignedEmployeeCount(toCompany, toPropertyId)
+    if (usedAtTarget >= toProperty.employeeSlots) {
+      return `Zielstandort voll (${usedAtTarget}/${toProperty.employeeSlots} Plätze).`
+    }
+
+    // Transferkosten basieren auf den Städten der Immobilien (nicht der Firmen-HQs)
+    const fromProperty = fromCompany.properties.find(p => p.id === employee.propertyId)
+    const fromCityId = fromProperty?.cityId ?? fromCompany.cityId
+    const { cost, newProductivity } = calcTransferInfo(fromCityId, toProperty.cityId)
+    if (state.capital < cost) {
+      return `Nicht genug Kapital. Transferkosten: ${cost.toLocaleString('de-DE')} ℛℳ`
+    }
+
+    const salaryDiff = employee.salary
+    const movedEmployee: Employee = {
+      ...employee,
+      propertyId: toPropertyId,
+      productivity: Math.min(employee.productivity, newProductivity),
+    }
+
+    const updatedCompanies = state.companies.map(c => {
+      if (c.id === fromCompanyId && c.id === toCompanyId) {
+        // Selbe Firma
+        return {
+          ...c,
+          employees: c.employees.map(e =>
+            e.id === employeeId ? movedEmployee : e
+          ),
+        }
+      }
+      if (c.id === fromCompanyId) {
+        return {
+          ...c,
+          employees: c.employees.filter(e => e.id !== employeeId),
+          expenses: c.expenses - salaryDiff,
+        }
+      }
+      if (c.id === toCompanyId) {
+        return {
+          ...c,
+          employees: [...c.employees, movedEmployee],
+          expenses: c.expenses + salaryDiff,
+        }
+      }
+      return c
+    })
+
+    set({ capital: state.capital - cost, companies: updatedCompanies })
     return null
   },
 

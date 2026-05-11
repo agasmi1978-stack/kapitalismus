@@ -122,14 +122,36 @@ function EmployeeRow({ emp, companyId }: { emp: Employee; companyId: string }) {
 export default function EmployeePanel({ companyId }: { companyId: string }) {
   const { companies, laborMarketAvailability, hireEmployee } = useGameStore()
   const { addToast } = useToastStore()
-  const company = companies.find(c => c.id === companyId)
+  // Welcher Level wartet auf Standort-Auswahl?
+  const [pendingLevel, setPendingLevel] = useState<EmployeeLevel | null>(null)
+  const [selectedPropertyId, setSelectedPropertyId] = useState<string>('')
 
+  const company = companies.find(c => c.id === companyId)
   if (!company) return null
 
-  const handleHire = (level: EmployeeLevel) => {
-    const err = hireEmployee(companyId, level)
+  const { assignedEmployeeCount } = (() => {
+    const fn = (propId: string) => company.employees.filter(e => e.propertyId === propId).length
+    return { assignedEmployeeCount: fn }
+  })()
+
+  const propertiesWithSlots = company.properties.filter(p => assignedEmployeeCount(p.id) < p.employeeSlots)
+
+  const handleLevelClick = (level: EmployeeLevel) => {
+    if (company.properties.length === 0) {
+      addToast('Keine Immobilie vorhanden. Kaufe zuerst einen Standort.', 'error')
+      return
+    }
+    setPendingLevel(level)
+    setSelectedPropertyId(propertiesWithSlots[0]?.id ?? '')
+  }
+
+  const handleConfirmHire = () => {
+    if (!pendingLevel || !selectedPropertyId) return
+    const err = hireEmployee(companyId, pendingLevel, selectedPropertyId)
     if (err) addToast(err, 'error')
-    else addToast(`${LEVEL_LABELS[level]} eingestellt! Einrichtungskosten: ${HIRING_COST[level].toLocaleString('de-DE')} ℛℳ`, 'success')
+    else addToast(`${LEVEL_LABELS[pendingLevel]} eingestellt! Kosten: ${HIRING_COST[pendingLevel].toLocaleString('de-DE')} ℛℳ`, 'success')
+    setPendingLevel(null)
+    setSelectedPropertyId('')
   }
 
   const byLevel = (level: EmployeeLevel) => company.employees.filter(e => e.level === level)
@@ -156,13 +178,53 @@ export default function EmployeePanel({ companyId }: { companyId: string }) {
       {/* Einstellen */}
       <div>
         <p className="text-xs text-stone-500 uppercase tracking-widest mb-2">Einstellen — Arbeitsmarkt diesen Monat</p>
+
+        {/* Standort-Auswahl Dialog */}
+        {pendingLevel && (
+          <div className="bg-stone-800 border border-amber-700 p-3 mb-3 space-y-2">
+            <p className="text-xs text-amber-300 font-semibold">
+              {LEVEL_LABELS[pendingLevel]} einstellen — Standort wählen:
+            </p>
+            {propertiesWithSlots.length === 0 ? (
+              <p className="text-xs text-red-400">Alle Standorte voll. Kaufe eine weitere Immobilie.</p>
+            ) : (
+              <select
+                value={selectedPropertyId}
+                onChange={e => setSelectedPropertyId(e.target.value)}
+                className="w-full bg-stone-700 border border-stone-600 text-stone-200 text-xs px-2 py-1.5 focus:outline-none focus:border-amber-600"
+              >
+                {propertiesWithSlots.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({assignedEmployeeCount(p.id)}/{p.employeeSlots} Plätze)
+                  </option>
+                ))}
+              </select>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={handleConfirmHire}
+                disabled={!selectedPropertyId || propertiesWithSlots.length === 0}
+                className="px-3 py-1.5 text-xs bg-amber-700 hover:bg-amber-600 text-amber-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Einstellen ({HIRING_COST[pendingLevel].toLocaleString('de-DE')} ℛℳ)
+              </button>
+              <button
+                onClick={() => setPendingLevel(null)}
+                className="px-3 py-1.5 text-xs border border-stone-600 text-stone-400 hover:text-stone-200"
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="space-y-1.5">
           {(['arbeiter', 'fachkraft', 'manager'] as EmployeeLevel[]).map(level => {
             const available = laborMarketAvailability[level]
             return (
               <button
                 key={level}
-                onClick={() => handleHire(level)}
+                onClick={() => available && handleLevelClick(level)}
                 disabled={!available}
                 className={`w-full flex items-center justify-between px-3 py-2 text-xs border transition-colors ${
                   available
@@ -176,7 +238,7 @@ export default function EmployeePanel({ companyId }: { companyId: string }) {
                   {!available && ' (nicht verfügbar)'}
                 </span>
                 <span className="font-mono text-stone-500">
-                  {HIRING_COST[level].toLocaleString('de-DE')} ℛℳ Einrichtung · {REVENUE_PER_EMPLOYEE[level].toLocaleString('de-DE')} ℛℳ/Mo max
+                  {HIRING_COST[level].toLocaleString('de-DE')} ℛℳ · max {REVENUE_PER_EMPLOYEE[level].toLocaleString('de-DE')} ℛℳ/Mo
                 </span>
               </button>
             )

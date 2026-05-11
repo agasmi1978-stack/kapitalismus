@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
 import { useGameStore, type Company } from '../../store/gameStore'
 import { BRANCH_LABELS, CITIES } from '../../data/cities'
 import CompanyDetail from './CompanyDetail'
@@ -111,17 +112,16 @@ export default function Dashboard() {
 
       {showFound && <FoundCompanyModal onClose={() => setShowFound(false)} />}
 
-      {/* Detailpanel */}
-      {selectedCompany && (
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="relative h-full pointer-events-auto">
-            <CompanyDetail
-              company={companies.find(c => c.id === selectedCompany.id) ?? selectedCompany}
-              onClose={() => setSelectedCompany(null)}
-            />
-          </div>
-        </div>
-      )}
+      {/* Detailpanel — blendet von unten ein */}
+      <AnimatePresence>
+        {selectedCompany && (
+          <CompanyDetail
+            key={selectedCompany.id}
+            company={companies.find(c => c.id === selectedCompany.id) ?? selectedCompany}
+            onClose={() => setSelectedCompany(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }
